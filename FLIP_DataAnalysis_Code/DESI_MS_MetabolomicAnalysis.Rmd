@@ -1,0 +1,1229 @@
+---
+title: "FLIP-1 Data Analysis - DESI-MS Metabolomics"
+output: html_document
+date: "20-03-2026"
+---
+
+```{r}
+here::i_am('./DESI_MS_MetabolomicAnalysis.Rmd')
+```
+
+### Load the required packages
+```{r, include=FALSE}
+library(here)
+library(readr)
+library(ggplot2)
+library(BiocParallel)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggpubr)
+library(patchwork)
+library(rstatix)
+library(caret)
+library(randomForest)
+library(ranger)
+library(doParallel)  
+library(plotROC)
+library(pROC)
+library(precrec)
+
+for (d in c('Results', 'Results/DESI', 'Figures')) {
+  if (!dir.exists(here(d))) dir.create(here(d), recursive = TRUE)
+}
+```
+
+
+#Load data
+```{r}
+FLIP_Clinical <- read_csv(here("Data/FLIP1_ClinicalData.csv"))
+
+FLIP_MicrobiomeParams <- read_csv(here("Data/Microbiome_Parameters_FLIP_VMET2.csv"))
+
+FLIP_Data <- merge(FLIP_Clinical, FLIP_MicrobiomeParams, by='Sequencing Name')
+
+FLIP_Data <- subset(FLIP_Data, `Sample Type` == "Participant sample")
+
+FLIP_Data <- FLIP_Data %>%  mutate(Outcome = case_when(Outcome == "Term" ~ "Term",
+                                                    Outcome == "iPTB" ~ "iPTB",
+                                                    Outcome == "sPTB" ~ "sPTB",
+                                                    Outcome == "SPTB" ~ "sPTB",))
+
+# Omit edge cases of pregnancy with rescue cerclage sampling and T6A and T3.5
+FLIP_Data <- subset(FLIP_Data, Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E29')
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E186')
+```
+
+# Import the FLIP Immune data
+```{r}
+FLIP_Immune <- read_csv('./Data/FLIP1_ImmuneMediator_Profiles.csv')
+
+FLIP_Immune <- FLIP_Immune %>% select(-c(`Gestation`, `Sample Name`, `Timepoint`, `FLIP number`))
+
+# Merge with available data
+FLIP_Immune <- FLIP_Data %>% inner_join(FLIP_Immune, by="Sequencing Name")
+```
+# Load DESI-MS data
+```{r}
+FLIP_DESI <- read_csv('./Data/FLIP_DESI_Data.csv')
+
+FLIP_Immune_DESI <- FLIP_Immune %>% inner_join(FLIP_DESI, by='Sequencing Name')
+FLIP_DESI <- FLIP_Data  %>% inner_join(FLIP_DESI, by='Sequencing Name')
+```
+
+
+### Define unified colour scheme
+```{r}
+CST_colours <-c("#004d00", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234","#800080")
+
+CST_colour_table <- rbind(table(FLIP_Data$CST), CST_colours)
+
+
+subCST_colour <- c("#004d00", "#228b22", "#66cdaa", "#ffcc00", "#ff8c00",
+                "#b22222", "#c62828", "#e34234", "#F28B84", "pink", "#800080")
+
+subCST_colour_table<- data.frame(rbind(table(FLIP_Data$subCST), subCST_colour))
+
+
+cst_colors_subsets <- c(
+  "I-A" = "#004d00",
+  "I-B" = "#228b22",
+  "II" = "#66cdaa",
+  "III-A" = "#ffcc00",
+  "III-B" = "#ff8c00",
+  "IV-A" = "#b22222",
+  "IV-B" = "#c62828",
+  "IV-C0" = "#e34234",
+  "IV-C2" = "#F28B84",
+  "IV-C3" = "#ffc0cb",
+  "V" = "#800080")
+
+df <- data.frame(CST = factor(names(cst_colors_subsets), levels = names(cst_colors_subsets)),
+  Color = cst_colors_subsets)
+
+subsCST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors_subsets) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),panel.grid = element_blank(),
+    legend.position = "none") +
+  labs(title = "CST subsets Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CSTsubsets.png"), subsCST_col)
+
+cst_colors <- c("I" = "#228b22", 
+               "II"= "#66cdaa",
+               "III"= "#ffcc00", 
+               "IV-A"= "#b22222", 
+               "IV-B"="#c62828",
+               "IV-C"= "#e34234",
+               "V" = "#800080")
+
+df <- data.frame( CST = factor(names(cst_colors), levels = names(cst_colors)),
+  Color = cst_colors)
+
+CST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank(), legend.position = "none") +
+  labs(title = "CST Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CST.png"), CST_col)
+```
+
+### Define a custom plotting theme to use in figure panel subplots
+```{r}
+theme_custom_plot <- function() {
+  theme_classic(base_size = 10) +
+    theme(axis.line = element_line(colour = "black", linewidth = 0.5),
+      axis.ticks = element_line(colour = "black", linewidth = 0.5),
+      axis.title = element_text(size = 11, face = "plain"),  
+      axis.text = element_text(size = 10, colour = "black"),
+      
+      legend.title = element_text(size = 11, face = "plain"), 
+      legend.text = element_text(size = 10),
+      legend.key.size = unit(0.5, "cm"),
+      legend.background = element_blank(),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 11, face = "bold"),  
+      panel.background = element_blank(),
+      plot.background = element_blank(),
+      panel.grid = element_blank(),
+      plot.tag = element_text(size = 14, face = "bold"))
+
+  }
+```
+
+# Data Analysis
+
+### Helper: reproducible caret resampling seeds
+Build a caret `seeds` list so every resample fit (and the final model) is reproducible,
+including under the parallel back-ends used below, where a single `set.seed()` does not
+reach the workers. `n_resamples` is the number of CV resamples; `n_models` the number of
+rows in the tuning grid.
+```{r}
+make_caret_seeds <- function(n_resamples, n_models = 1, seed = 1) {
+  set.seed(seed)
+  s <- vector("list", n_resamples + 1)
+  for (i in seq_len(n_resamples)) s[[i]] <- sample.int(1e6, n_models)
+  s[[n_resamples + 1]] <- sample.int(1e6, 1)
+  s
+}
+```
+
+## Random Forest classifiers
+### Discrimination of Lactobacillus-dominant vs L. deplete communities
+```{r}
+set.seed(325562)
+
+metaboliteColumnIdx <- 41:ncol(FLIP_DESI)
+
+dataset_train <- FLIP_DESI
+dataset_train <- dataset_train[, c("CST", colnames(dataset_train)[metaboliteColumnIdx])]
+dataset_train <- dataset_train[rowSums(is.na(dataset_train)) < 7, ]
+
+dataset_train$CST[grepl("IV", dataset_train$CST)] <- "IV"
+dataset_train$CST[!grepl("IV", dataset_train$CST)] <- "LDom"
+
+dataset_train$CST <- factor(dataset_train$CST, levels=c('LDom', 'IV'))
+
+fit_control <- trainControl(method = "repeatedcv", repeats=15, classProbs = TRUE,
+                          number = 7, summaryFunction=multiClassSummary, 
+                          #preProcOptions = c('knnImpute', 'center', 'scale'), 
+                          savePredictions=TRUE,
+                          seeds = make_caret_seeds(15 * 7, n_models = 1, seed = 325562))
+
+train_x <- dataset_train %>% select(-CST, )
+train_y <- dataset_train$CST
+
+CST_Model <- train(x = train_x, y = train_y, method = 'rf', 
+                     trControl = fit_control, 
+                     preProcess = c('center', 'scale'),
+                     ntree = 1000, metric = 'AUC', 
+                     tuneGrid = data.frame(mtry = floor(sqrt(ncol(train_x)))))
+
+
+modelResults <- rbind(CST_Model$results)
+
+write_csv(modelResults, './Results/DESI/RFModel_LDomvsLDepl_Results.csv')
+
+saveRDS(CST_Model, './Results/DESI/RF_LDomModel.rds')
+```
+
+```{r}
+# To skip retraining above, comment out the training chunk and uncomment:
+# CST_Model <- readRDS(here('./Results/DESI/RF_LDomModel.rds'))
+```
+
+### ROC AUC curves
+```{r}
+target <- 'IV'
+
+# Both model
+cv_original_class <- CST_Model$pred$obs
+cv_predictor_avg <- CST_Model$pred[, target]
+roc_CST <- roc(cv_original_class, cv_predictor_avg, ci = TRUE, direction="<")
+RFmodelBoth <- data.frame(Class = cv_original_class, target = cv_predictor_avg)
+
+# AUCs
+label_microbiome <- sprintf(" = %.2f", as.numeric(roc_CST$auc))
+
+rocAllData <- RFmodelBoth
+
+rocAllData$Class <- factor(rocAllData$Class, levels = c('LDom', 'IV'), labels = c('LDom', 'IV'))
+
+roc_plot <- ggplot(rocAllData, 
+    aes(m = target, d = as.numeric(factor(Class, levels = c('LDom', 'IV'))) - 1)) + 
+    geom_roc(hjust = 0, vjust = 0, n.cuts = 0, col='firebrick3') + 
+    style_roc(theme = theme_light, guide = F, xlab = '1 - Specificity', ylab = 'Sensitivity') + 
+    geom_abline(linetype = 2, linewidth = 0.3) + 
+    theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+      axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), 
+      legend.text = element_text(size = 14), legend.title = element_text(size = 16))
+
+  
+# ggsave('./Figures/Metabolomic/DESI_LdomvsLdepl_ROC.png', roc_plot, dpi = 300, width = 10, height = 8)
+# ggsave('./Figures/Metabolomic/DESI_LdomvsLdepl_ROC.svg', roc_plot, dpi = 300, width = 10, height = 8)
+```
+
+## Immune Models
+### List of Immune params to look in RF models
+```{r}
+ImmuneParams <- c("IL6 (DS 1.7)", "IL1B (DS 0.4)", "IL8 (DS x10)", "C1q (AS 0.0335)", "C3a (AS 17.5)", 
+                  "C3b (AS 2.3875)", "C4 (AS 0.073)", "Factor H (AS)",
+                  "C2 (AS 0.17)", "C4b (AS 0.165)", "C5 (AS 0.4)", "C5a (AS 0.00175)", "Factor D (AS 0.0135)", 
+                  "MBL (AS 0.0165)", "MMP-2 (AS 54)", "MMP-8 (AS 17.1)", "MMP-9 (AS)")
+```
+
+### Iterate and fit RF regressor model to multiple immune mediators
+```{r}
+set.seed(2563748)
+
+n_cores <- detectCores() - 1
+
+fitRFModel <- function(marker, dataset) {
+  
+  clean_name <- gsub(" \\(.*\\)$", "", marker) %>%
+    gsub(" ", "_", .) %>%
+    gsub("-", "", .)
+  
+  metaboliteColumnIdx <- 66:ncol(dataset)
+  dataset_train <- dataset[, c(marker, colnames(dataset)[metaboliteColumnIdx])]
+  colnames(dataset_train)[1] <- 'ImmuneMarker'
+  dataset_train[, 1] <- as.numeric(dataset_train[, 1])
+
+  # Drop samples with a missing cytokine measurement (ranger disallows NA in the response)
+  dataset_train <- dataset_train[!is.na(dataset_train$ImmuneMarker), ]
+
+  train_x <- dataset_train %>% select(-ImmuneMarker)
+  train_y <- dataset_train$ImmuneMarker
+
+  tryCatch({registerDoParallel(cores = n_cores)
+
+    fit_control <- trainControl(method = "repeatedcv",
+      repeats = 15,   number = 7, summaryFunction = defaultSummary,
+      savePredictions = TRUE,
+      seeds = make_caret_seeds(15 * 7, n_models = 1, seed = 2563748))
+      
+    rf_model <- train(x = train_x, y = log(train_y), 
+      method = 'ranger', trControl = fit_control, 
+      preProcess = c('center', 'scale'), metric = 'RMSE', 
+      tuneGrid = data.frame(mtry = floor(ncol(train_x) / 3),
+        splitrule = "variance", min.node.size = 5),
+      num.trees = 1000,   num.threads = n_cores)
+    
+    stopImplicitCluster()
+    registerDoSEQ()
+    
+    saveRDS(rf_model, here(paste0('./Results/DESI/RF_', clean_name, '.rds')))
+    
+    return(list(model = rf_model,  results = cbind(Marker = clean_name, 
+                                                   rf_model$results)))
+  }, error = function(e) {
+    stopImplicitCluster()
+    registerDoSEQ()
+    message(paste("Error for", marker, ":", e$message))
+    return(list(model = NULL, results = NULL))
+    })
+}
+
+all_models <- bplapply(ImmuneParams, FUN = fitRFModel,
+  dataset = FLIP_Immune_DESI, BPPARAM = SerialParam())
+
+names(all_models) <- gsub(" \\(.*\\)$", "", ImmuneParams) %>%
+  gsub(" ", "_", .) %>%
+  gsub("-", "", .)
+
+all_results <- map_df(all_models, ~.x$results) %>%
+  arrange(desc(Rsquared))
+
+all_rf_models <- map(all_models, ~.x$model)
+
+print(all_results)
+
+write_csv(all_results, here('./Results/DESI/RF_ImmuneParams_Results.csv'))
+```
+
+```{r}
+# To skip retraining above, comment out the training chunk and uncomment:
+# rf_files <- list.files(here('Results/DESI'), pattern = '^RF_.*\\.rds$', full.names = TRUE)
+# rf_files <- rf_files[!grepl('RF_LDomModel', rf_files)]
+# all_rf_models <- lapply(rf_files, readRDS)
+# names(all_rf_models) <- gsub('^RF_|\\.rds$', '', basename(rf_files))
+```
+
+### Fit the C1q regressor on its own
+C1q was omitted from the earlier multi-marker run, so it has no saved model. Fit only C1q here
+(the other 16 are left untouched), then reload every marker model from disk so the panel below
+sees all 17.
+```{r}
+set.seed(2563748)
+n_cores <- detectCores() - 1
+
+# fitRFModel() writes Results/DESI/RF_C1q.rds internally.
+invisible(fitRFModel("C1q (AS 0.0335)", dataset = FLIP_Immune_DESI))
+
+# Reload every fitted marker model from disk (now including RF_C1q.rds).
+rf_files <- list.files(here('Results/DESI'), pattern = '^RF_.*\\.rds$', full.names = TRUE)
+rf_files <- rf_files[!grepl('RF_LDomModel', rf_files)]
+all_rf_models <- lapply(rf_files, readRDS)
+names(all_rf_models) <- gsub('^RF_|\\.rds$', '', basename(rf_files))
+```
+
+## Plot
+```{r}
+# Plotting function to extract CV-predictions and use in RF-regressor scatterplots
+plot_cv_predictions <- function(model, marker_name, data,
+                                xlab = "log(Observed)", 
+                                ylab = "log(Predicted)") {
+  
+  preds <- model$pred %>%
+    filter(Resample %in% grep("Rep01", unique(Resample), value = TRUE)) %>%
+    mutate(sample_idx = rowIndex) %>%
+    left_join(data %>% 
+        mutate(sample_idx = row_number()) %>%
+        select(sample_idx, CST),
+      by = "sample_idx")
+  
+  r2 <- cor(preds$obs, preds$pred)^2
+  
+  p <- ggplot(preds, aes(x = obs, y = pred)) +
+    geom_point(aes(fill = CST), 
+      alpha = 0.7, 
+      size = 2.5,
+      shape = 21,
+      colour = "black",
+      stroke = 0.3) +
+    geom_smooth(method = "lm", 
+      col = "firebrick4", 
+      linetype = "dashed", 
+      se = FALSE,
+      linewidth = 0.5) +
+    scale_fill_manual(values = cst_colors, name = "CST") +
+    annotate("text", 
+      x = min(preds$obs), 
+      y = max(preds$pred),
+      label = paste0("R² = ", round(r2, 3)),
+      hjust = 0, 
+      vjust = 1, 
+      size = 6) +
+    labs(x = xlab, y = ylab) +
+    theme_custom_plot()
+  
+  return(p)}
+
+
+# Create example plots for visualisation
+IL8_plot <- plot_cv_predictions(
+  model = all_rf_models[["IL8"]], 
+  marker_name = "IL-8",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed IL-8 pg/mL)",
+  ylab = "log(Predicted IL-8 pg/mL)")
+
+C3b_plot <- plot_cv_predictions(
+  model = all_rf_models[["C3b"]], 
+  marker_name = "C3b",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed C3b ng/mL)",
+  ylab = "log(Predicted C3b ng/mL)")
+
+C3a_plot <- plot_cv_predictions(
+  model = all_rf_models[["C3a"]], 
+  marker_name = "C3a",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed C3a pg/mL)",
+  ylab = "log(Predicted C3a pg/mL)")
+
+MBL_plot <- plot_cv_predictions(
+  model = all_rf_models[["MBL"]], 
+  marker_name = "MBL",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed MBL ng/mL)",
+  ylab = "log(Predicted MBL ng/mL)")
+
+IL6_plot <- plot_cv_predictions(
+  model = all_rf_models[["IL6"]], 
+  marker_name = "IL-6",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed IL-6 pg/mL)",
+  ylab = "log(Predicted IL-6 pg/mL)")
+
+IL1B_plot <- plot_cv_predictions(
+  model = all_rf_models[["IL1B"]], 
+  marker_name = "IL-1B",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed IL-1β pg/mL)",
+  ylab = "log(Predicted IL-1β pg/mL)")
+
+C4_plot <- plot_cv_predictions(
+  model = all_rf_models[["C4"]], 
+  marker_name = "C4",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed C4 ng/mL)",
+  ylab = "log(Predicted C4 ng/mL)")
+
+FactorH_plot <- plot_cv_predictions(
+  model = all_rf_models[["Factor_H"]], 
+  marker_name = "Factor_H",
+  data = FLIP_Immune_DESI,
+  xlab = "log(Observed Factor H ng/mL)",
+  ylab = "log(Predicted Factor H ng/mL)")
+
+# quick patchwork code to inspect multiple plots
+# rf_predictions_panel <- (IL8_plot + IL1B_plot) / (C4_plot + FactorH_plot) +
+#   plot_layout(guides = "collect") +
+#   plot_annotation(tag_levels = "A")
+
+# to save individual plots...
+#ggsave(here("./Figures/RF_CV_Predictions.png"),
+#  rf_predictions_panel,
+#  width = 183,
+#  height = 183,
+#  units = "mm",
+#  dpi = 300)
+```
+
+## Assemble panel of all RF CV predictions
+```{r}
+# Mapping of analyte Id to cleaner name and unit. 
+marker_metadata <- tibble::tribble(
+  ~clean,     ~display,    ~unit,
+  "IL6",      "IL-6",      "pg/mL",
+  "IL1B",     "IL-1β","pg/mL",
+  "IL8",      "IL-8",      "pg/mL",
+  "C1q",      "C1q",       "ng/mL",
+  "C3a",      "C3a",       "pg/mL",
+  "C3b",      "C3b",       "ng/mL",
+  "C4",       "C4",        "ng/mL",
+  "Factor_H", "Factor H",  "ng/mL",
+  "MBL",      "MBL",       "ng/mL",
+  "C2",       "C2",        "ng/mL",
+  "C4b",      "C4b",       "ng/mL",
+  "C5",       "C5",        "ng/mL",
+  "C5a",      "C5a",       "pg/mL",
+  "Factor_D", "Factor D",  "ng/mL",
+  "MMP2",     "MMP-2",     "pg/mL",
+  "MMP8",     "MMP-8",     "pg/mL",
+  "MMP9",     "MMP-9",     "pg/mL")
+
+# Keep only markers with an available (non-NULL) fitted model
+marker_metadata <- marker_metadata %>%
+  filter(clean %in% names(all_rf_models)) %>%
+  filter(!map_lgl(clean, ~ is.null(all_rf_models[[.x]])))
+
+rf_all_prediction_plots <- pmap(marker_metadata, function(clean, display, unit) {
+  plot_cv_predictions(
+    model = all_rf_models[[clean]],
+    marker_name = display,
+    data = FLIP_Immune_DESI,
+    xlab = paste0("log(Observed ", display, " ", unit, ")"),
+    ylab = paste0("log(Predicted ", display, " ", unit, ")"))
+})
+
+rf_all_predictions_panel <- wrap_plots(rf_all_prediction_plots, ncol = 4) +
+  plot_layout(guides = "collect") +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(size = 18, face = "bold", family = "sans"))
+
+ggsave('./Figures/Metabolomic/RF_CV_Predictions_AllMarkers.png', rf_all_predictions_panel,
+  dpi = 300, width = 16, height = 18)
+ggsave('./Figures/Metabolomic/RF_CV_Predictions_AllMarkers.svg', rf_all_predictions_panel,
+  dpi = 300, width = 16, height = 18)
+```
+
+
+## Univariate analysis of individual markers
+### Load features previously annoted in Pruski et al 2021
+```{r}
+immuneFeatures <- read_csv(here('./Data/Immune_Features_DESI.csv'))
+microbiomeFeatures <- read_csv(here('./Data/Microbiota_Features_DESI.csv'))
+
+mz_columns <- colnames(FLIP_DESI)[41:ncol(FLIP_DESI)]
+mz_values <- as.numeric(mz_columns)
+
+find_closest_mz <- function(theoretical_mz, mz_values, mz_columns, ppm_tolerance = 15) {
+  
+  ppm_errors <- abs((mz_values - theoretical_mz) / theoretical_mz * 1e6)
+  
+  min_ppm <- min(ppm_errors)
+  
+  if (min_ppm <= ppm_tolerance) {
+    best_idx <- which.min(ppm_errors)
+    return(list(matched_column = mz_columns[best_idx],  
+      matched_mz = mz_values[best_idx],        
+      ppm_error = min_ppm))
+  } else {
+    return(list(matched_column = NA_character_,
+      matched_mz = NA_real_,
+      ppm_error = NA_real_))}}
+
+
+## Match microbiome Features
+microbiomeFeatures <- microbiomeFeatures %>%
+  select(c(`Metabolite Annotation`, `Theoretical m/z` ,`Adduct`, `Elevated in`)) %>%
+  rowwise() %>%
+  mutate(match_result = list(find_closest_mz(`Theoretical m/z`, mz_values, mz_columns, ppm_tolerance = 15))) %>%
+  ungroup() %>% unnest_wider(match_result)
+
+microbiomeFeatures <- microbiomeFeatures %>%
+  filter(!is.na(matched_column))
+
+microbiomeFeatures$Signature <- 'Microbiome'
+
+## Match Immune Features
+immuneFeatures <- immuneFeatures %>%
+  select(c(`Metabolite Annotation`, `m/z theoretical` ,Adduct)) %>%
+  filter(!is.na(`m/z theoretical`)) %>%
+  rowwise() %>%
+  mutate(match_result = list(find_closest_mz(`m/z theoretical`, mz_values, mz_columns, ppm_tolerance = 15))) %>%
+  ungroup() %>% unnest_wider(match_result)
+
+immuneFeatures <- immuneFeatures %>%
+  filter(!is.na(matched_column))
+
+immuneFeatures$Signature <- 'Immune'
+immuneFeatures <- immuneFeatures %>% rename(`Theoretical m/z` = `m/z theoretical`)
+
+
+allFeatures <- microbiomeFeatures %>% bind_rows(immuneFeatures)
+
+# Save the matched features
+write_csv(allFeatures, here('./Results/matched_DESI_MS_Features.csv'))
+```
+
+## Analysis of metabolic shifts with CST transition from T0 to T1. 
+```{r}
+FLIP_Paired_T0T1 <- FLIP_DESI %>%
+  group_by(`FLIP number`) %>%
+  filter(all(c("T0", "T1") %in% Timepoint)) %>%
+  mutate(CST_T0 = CST[Timepoint == "T0"],
+    CST_T1 = CST[Timepoint == "T1"],
+    CST_changed = CST_T0 != CST_T1) %>%
+  ungroup() %>%
+  filter(Timepoint %in% c("T0", "T1")) %>% 
+  mutate(CST_changed = case_when(CST_changed == TRUE ~ "CST Transition",
+          CST_changed == FALSE ~ "Stable CST"))
+
+FLIP_Paired_T0T1$CST_changed <- factor(FLIP_Paired_T0T1$CST_changed, levels=c("Stable CST", "CST Transition"))
+
+FLIP_CST_changers <- FLIP_Paired_T0T1 %>%
+  select(`FLIP number`, Timepoint, CST) %>%
+  pivot_wider(names_from = Timepoint, values_from = CST, names_prefix = "CST_") %>%
+  mutate(CST_changed = CST_T0 != CST_T1)
+
+FLIP_Paired_T0T1_annotated <- FLIP_Paired_T0T1 %>%
+  left_join(FLIP_CST_changers, by = "FLIP number") 
+
+# Get m/z features
+mz_features <- colnames(FLIP_DESI)[41:ncol(FLIP_DESI)]
+
+FLIP_long_format_CST_changers <- FLIP_Paired_T0T1 %>%
+  filter(CST_changed == "CST Transition") %>%
+  select(`FLIP number`, Timepoint, all_of(mz_features)) %>%
+  pivot_longer(cols = all_of(mz_features),
+    names_to = "feature", 
+    values_to = "intensity")
+
+wilcox_results_DESI_CSTChange <- FLIP_long_format_CST_changers %>%
+  group_by(feature) %>%
+  wilcox_test(intensity ~ Timepoint, 
+              paired = TRUE) %>%  
+  ungroup() %>% 
+  mutate(p.adj = p.adjust(p, method = "BH")) %>%
+  arrange(p.adj)
+
+# join with annotated features
+wilcox_annotated_DESI_CSTChange <- wilcox_results_DESI_CSTChange %>%
+  left_join(allFeatures %>% select(matched_column, `Metabolite Annotation`, 
+                                   `Theoretical m/z`, ppm_error, Signature, `Elevated in`),
+    by = c("feature" = "matched_column")) %>%
+  write_csv(here('./Results/DESI_CST_T0_T1.csv')) %>%
+  filter(!is.na(`Metabolite Annotation`)) %>%
+  arrange(p.adj)
+
+# Save the annotated CST-transition metabolites (all results, annotated features only)
+write_csv(wilcox_annotated_DESI_CSTChange, here('./Results/DESI_CST_T0_T1_Metabolites.csv'))
+```
+
+### Exemplar plots to use in Figure
+```{r}
+# Custom functions to control subplots and significance brackets.
+desi_signif_layer <- function(data, mz_col) {
+  d2 <- data %>% dplyr::arrange(`FLIP number`, Timepoint)
+  d2$paired_val <- log(as.numeric(d2[[mz_col]]) + 1)
+  stat <- tryCatch(
+    d2 %>%
+      dplyr::group_by(CST_changed) %>%
+      rstatix::wilcox_test(paired_val ~ Timepoint, paired = TRUE) %>%
+      rstatix::add_significance() %>%
+      rstatix::add_xy_position(x = "Timepoint") %>%
+      dplyr::filter(p.signif != "ns"),
+    error = function(e) NULL)
+  if (is.null(stat) || nrow(stat) == 0) return(NULL)
+  ggpubr::stat_pvalue_manual(stat, label = "p.signif", tip.length = 0.01, size = 3.5)
+}
+
+DESI_markerPlot_Feature_StearicAcid <- ggplot(FLIP_Paired_T0T1,
+  aes(x = Timepoint, y = log(as.numeric(`283.2625409`) + 1))) + 
+  geom_line(aes(group = `FLIP number`), 
+    col = 'grey55', 
+    alpha = 0.4, 
+    linetype = "dashed",
+    linewidth = 0.4) + 
+  geom_point(aes(fill = CST),
+    alpha = 0.7,
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3,
+    show.legend = TRUE) +
+  facet_wrap(~CST_changed) + 
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  desi_signif_layer(FLIP_Paired_T0T1, "283.2625409") +
+  labs(y = "log(Stearic Acid (C18:0) a.u.)") +
+  theme_custom_plot()
+
+DESI_markerPlot_Feature_NervonicAcid <- ggplot(FLIP_Paired_T0T1, 
+  aes(x = Timepoint, y = log(as.numeric(`365.3459293`) + 1))) + 
+  geom_line(aes(group = `FLIP number`), 
+    col = 'grey55', 
+    alpha = 0.4, 
+    linetype = "dashed",
+    linewidth = 0.4) + 
+  geom_point(aes(fill = CST),
+    alpha = 0.7,
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3,
+    show.legend = TRUE) +
+  facet_wrap(~CST_changed) + 
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  desi_signif_layer(FLIP_Paired_T0T1, "365.3459293") +
+  labs(y = "log(Nervonic Acid (C24:1) a.u.)") +
+  theme_custom_plot()
+
+DESI_markerPlot_Feature_valSer <- ggplot(FLIP_Paired_T0T1, 
+  aes(x = Timepoint, y = log(as.numeric(`203.1020219`) + 1))) + 
+  geom_line(aes(group = `FLIP number`), 
+    col = 'grey55', 
+    alpha = 0.4, 
+    linetype = "dashed",
+    linewidth = 0.4) + 
+  geom_point(aes(fill = CST),
+    alpha = 0.7,
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3,
+    show.legend = TRUE) +
+  facet_wrap(~CST_changed) + 
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  desi_signif_layer(FLIP_Paired_T0T1, "203.1020219") +
+  labs(y = "log(Valeryl-Serine a.u.)") +
+  theme_custom_plot()
+
+DESI_markerPlot_Feature_PalmytMet <- ggplot(FLIP_Paired_T0T1, 
+  aes(x = Timepoint, y = log(as.numeric(`368.2635379`) + 1))) + 
+  geom_line(aes(group = `FLIP number`), 
+    col = 'grey55', 
+    alpha = 0.4, 
+    linetype = "dashed",
+    linewidth = 0.4) + 
+  geom_point(aes(fill = CST),
+    alpha = 0.7,
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3,
+    show.legend = TRUE) +
+  facet_wrap(~CST_changed) + 
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  desi_signif_layer(FLIP_Paired_T0T1, "368.2635379") +
+  labs(y = "log(N-palmitoyl methionine a.u.)") +
+  theme_custom_plot()
+
+# Code to combine plots for a quick visualisation
+# combined_desi_plots <- (DESI_markerPlot_Feature_valSer + DESI_markerPlot_Feature_StearicAcid) /
+#                        (DESI_markerPlot_Feature_PalmytMet + DESI_markerPlot_Feature_NervonicAcid) +
+#   plot_layout(guides = "collect") + plot_annotation(tag_levels = 'A')
+
+# to save figure
+#ggsave(here("./Figures/Metabolomic/DESI_Metabolites_CST_Change.pdf"),
+#  combined_desi_plots,
+#  width = 183,
+#  height = 183,
+#  units = "mm",
+#  device = cairo_pdf)
+
+#ggsave(here("./Figures/Metabolomic/DESI_Metabolites_CST_Change.png"),
+#  combined_desi_plots,
+#  width = 183,
+#  height = 183,
+#  units = "mm",
+#  dpi = 300)
+```
+
+### Supplementary panel of CST-transition metabolites
+```{r}
+# Top 16 non-annotated (unidentified) m/z features with the strongest T0->T1 CST-transition shift.
+top16_nonannotated_CSTChange <- wilcox_results_DESI_CSTChange %>%
+  anti_join(allFeatures, by = c("feature" = "matched_column")) %>%
+  filter(p.adj < 0.05) %>%
+  arrange(p.adj) %>%
+  slice_head(n = 16)
+
+# Generalised plotting util function
+make_cst_transition_plot <- function(mz_col) {
+  ggplot(FLIP_Paired_T0T1,
+    aes(x = Timepoint, y = log(as.numeric(.data[[mz_col]]) + 1))) +
+    geom_line(aes(group = `FLIP number`), col = "grey55", alpha = 0.4,
+      linetype = "dashed", linewidth = 0.4) +
+    geom_point(aes(fill = CST), alpha = 0.7, size = 2.5, shape = 21,
+      colour = "black", stroke = 0.3, show.legend = TRUE) +
+    facet_wrap(~CST_changed) +
+    scale_fill_manual(values = cst_colors, name = "CST") +
+    desi_signif_layer(FLIP_Paired_T0T1, mz_col) +
+    labs(y = paste0("log(m/z ", round(as.numeric(mz_col), 4), " a.u.)")) +
+    theme_custom_plot()
+}
+
+cst_transition_plots <- map(top16_nonannotated_CSTChange$feature, make_cst_transition_plot)
+
+cst_transition_panel <- wrap_plots(cst_transition_plots, ncol = 4) +
+  plot_layout(guides = "collect") + plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(size = 18, face = "bold", family = "sans"))
+
+ggsave("./Figures/Metabolomic/DESI_CST_Transition_NonAnnotated_Top16.png",
+  cst_transition_panel, dpi = 300, width = 20, height = 18)
+ggsave("./Figures/Metabolomic/DESI_CST_Transition_NonAnnotated_Top16.svg",
+  cst_transition_panel, dpi = 300, width = 20, height = 18)
+```
+
+## Correlation between immune markers and DESI-MS features
+```{r}
+FLIP_long_format_Immune <- FLIP_Immune_DESI %>%
+  select(`FLIP number`, Timepoint, `IL1B (DS 0.4)`, all_of(mz_features)) %>%
+  pivot_longer(cols = all_of(mz_features),
+    names_to = "feature", 
+    values_to = "intensity") 
+
+correlation_results_DESI_IL1 <- FLIP_long_format_Immune %>%
+  group_by(feature) %>%
+  cor_test(intensity, `IL1B (DS 0.4)`,
+    method = "spearman") %>%
+  ungroup() %>%
+  mutate(p.adj = p.adjust(p, method = "BH"),
+    significant = p.adj < 0.05) %>%
+  arrange(p.adj)
+
+# Merge with annotations
+correlation_annotated_IL1B <- correlation_results_DESI_IL1 %>%
+  left_join(immuneFeatures %>% select(matched_column, `Metabolite Annotation`, 
+                                   `Theoretical m/z`, ppm_error, Signature),
+            by = c("feature" = "matched_column")) %>%
+  filter(!is.na(`Metabolite Annotation`)) %>%
+  arrange(p.adj)
+```
+
+### Example plots for metabolite - Immune marker associations
+```{r}
+# Galabiosylceramide vs IL-1β
+r2_galabios <- cor(log(FLIP_Immune_DESI$`IL1B (DS 0.4)`), 
+                   log(FLIP_Immune_DESI$`896.5955034` + 1), 
+                   method = 'spearman')
+
+DESI_scatterPlot_Feature_GalabiosCer <- ggplot(FLIP_Immune_DESI, 
+  aes(x = log(`IL1B (DS 0.4)`), y = log(`896.5955034` + 1))) +
+  geom_point(aes(fill = CST), 
+    alpha = 0.7, 
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3) +
+  geom_smooth(
+    method = "lm", 
+    col = "firebrick4", 
+    linetype = "dashed", 
+    se = FALSE,
+    linewidth = 0.5) +
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  annotate("text", 
+    x = min(log(FLIP_Immune_DESI$`IL1B (DS 0.4)`)), 
+    y = max(log(FLIP_Immune_DESI$`896.5955034` + 1)),
+    label = paste0("ρ = ", round(r2_galabios, 3)),
+    hjust = 0, 
+    vjust = 1, 
+    size = 6) +
+  labs(x = "log(IL-1β pg/mL)", y = "log(Galabiosylceramide (d18:1/16:0) a.u.)") +
+  theme_custom_plot()
+
+# PI vs C4
+r2_PI <- cor(log(FLIP_Immune_DESI$`C4 (AS 0.073)`), 
+             log(FLIP_Immune_DESI$`885.5488704` + 1), 
+             method = 'spearman')
+
+DESI_scatterPlot_Feature_PI <- ggplot(FLIP_Immune_DESI, 
+  aes(x = log(`C4 (AS 0.073)`), y = log(`885.5488704` + 1))) +
+  geom_point(aes(fill = CST), 
+    alpha = 0.7, 
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3) +
+  geom_smooth(method = "lm", 
+    col = "firebrick4", 
+    linetype = "dashed", 
+    se = FALSE,
+    linewidth = 0.5) +
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  annotate("text", 
+    x = min(log(FLIP_Immune_DESI$`C4 (AS 0.073)`)), 
+    y = max(log(FLIP_Immune_DESI$`885.5488704` + 1)),
+    label = paste0("ρ = ", round(r2_PI, 3)),
+    hjust = 0, 
+    vjust = 1, 
+    size = 6) +
+  labs(x = "log(C4 ng/mL)", y = "log(PI(20:4/18:0) a.u.)") +
+  theme_custom_plot()
+
+# Lactoylcysteine vs Factor H
+r2_lactoylcyst <- cor(log(FLIP_Immune_DESI$`Factor H (AS)`), 
+                      log(FLIP_Immune_DESI$`192.0317738` + 1), 
+                      method = 'spearman')
+
+DESI_scatterPlot_Feature_lactoylcyst <- ggplot(FLIP_Immune_DESI, 
+  aes(x = log(`Factor H (AS)`), y = log(`192.0317738` + 1))) +
+  geom_point(
+    aes(fill = CST), 
+    alpha = 0.7, 
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3) +
+  geom_smooth(method = "lm", 
+    col = "firebrick4", 
+    linetype = "dashed", 
+    se = FALSE,
+    linewidth = 0.5) +
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  annotate("text",
+    x = max(log(FLIP_Immune_DESI$`Factor H (AS)`)),
+    y = max(log(FLIP_Immune_DESI$`192.0317738` + 1)),
+    label = paste0("ρ = ", round(r2_lactoylcyst, 3)),
+    hjust = 1,
+    vjust = 1,
+    size = 6) +
+  labs(x = "log(Factor H ng/mL)", y = "log(Lactoylcysteine a.u.)") +
+  theme_custom_plot()
+
+# Galbeta-Cer vs C3b
+r2_galb <- cor(log(FLIP_Immune_DESI$`C3b (AS 2.3875)`), 
+               log(FLIP_Immune_DESI$`898.5870525` + 1), 
+               method = 'spearman')
+
+DESI_scatterPlot_Feature_GalB <- ggplot(FLIP_Immune_DESI, 
+  aes(x = log(`C3b (AS 2.3875)`), y = log(`898.5870525` + 1))) +
+  geom_point(aes(fill = CST), 
+    alpha = 0.7, 
+    size = 2.5,
+    shape = 21,
+    colour = "black",
+    stroke = 0.3) +
+  geom_smooth(
+    method = "lm", 
+    col = "firebrick4", 
+    linetype = "dashed", 
+    se = FALSE,
+    linewidth = 0.5) +
+  scale_fill_manual(values = cst_colors, name = "CST") +
+  annotate("text", 
+    x = min(log(FLIP_Immune_DESI$`C3b (AS 2.3875)`)), 
+    y = max(log(FLIP_Immune_DESI$`898.5870525` + 1)),
+    label = paste0("ρ = ", round(r2_galb, 3)),
+    hjust = 0, 
+    vjust = 1, 
+    size = 6) +
+  labs(x = "log(C3b ng/mL)", y = "log(Galbeta-Cer(d40:1) a.u.)") +
+  theme_custom_plot()
+
+# Plot tempalte with patchwork to visualise multiple markers
+#combined_scatter_plots <- (DESI_scatterPlot_Feature_GalabiosCer + DESI_scatterPlot_Feature_PI) /
+#                          (DESI_scatterPlot_Feature_lactoylcyst + DESI_scatterPlot_Feature_GalB) +
+#  plot_layout(guides = "collect") +
+#  plot_annotation(tag_levels = 'A')
+
+# Save
+#ggsave(here("./Figures/Metabolomic/DESI_Immune_Correlations.pdf"),
+#  combined_scatter_plots,
+#  width = 183,
+#  height = 183,
+#  units = "mm",
+#  device = cairo_pdf)
+
+#ggsave(here("./Figures/Metabolomic/DESI_Immune_Correlations.png"),
+# combined_scatter_plots,
+# width = 183,
+# height = 183,
+# units = "mm",
+# dpi = 300)
+```
+
+### Supplementary metabolite–cytokine correlation panel
+```{r}
+# Mapping of analyte Id to cleaner name and unit. 
+cytokine_meta <- tibble::tribble(
+  ~marker,                ~display,   ~unit,
+  "IL6 (DS 1.7)",         "IL-6",     "pg/mL",
+  "IL1B (DS 0.4)",        "IL-1β",    "pg/mL",
+  "IL8 (DS x10)",         "IL-8",     "pg/mL",
+  "C1q (AS 0.0335)",      "C1q",      "ng/mL",
+  "C3a (AS 17.5)",        "C3a",      "pg/mL",
+  "C3b (AS 2.3875)",      "C3b",      "ng/mL",
+  "C4 (AS 0.073)",        "C4",       "ng/mL",
+  "Factor H (AS)",        "Factor H", "ng/mL",
+  "C2 (AS 0.17)",         "C2",       "ng/mL",
+  "C4b (AS 0.165)",       "C4b",      "ng/mL",
+  "C5 (AS 0.4)",          "C5",       "ng/mL",
+  "C5a (AS 0.00175)",     "C5a",      "pg/mL",
+  "Factor D (AS 0.0135)", "Factor D", "ng/mL",
+  "MBL (AS 0.0165)",      "MBL",      "ng/mL",
+  "MMP-2 (AS 54)",        "MMP-2",    "pg/mL",
+  "MMP-8 (AS 17.1)",      "MMP-8",    "pg/mL",
+  "MMP-9 (AS)",           "MMP-9",    "pg/mL")
+
+correlate_marker <- function(marker) {
+  df <- FLIP_Immune_DESI %>%
+    select(`FLIP number`, Timepoint, all_of(marker), all_of(mz_features))
+  names(df)[names(df) == marker] <- "cytokine"
+  df %>%
+    pivot_longer(all_of(mz_features), names_to = "feature", values_to = "intensity") %>%
+    group_by(feature) %>%
+    cor_test(intensity, cytokine, method = "spearman") %>%
+    ungroup() %>%
+    mutate(Marker = marker, p.adj = p.adjust(p, method = "BH"))
+}
+
+all_cor_results <- map_dfr(ImmuneParams, correlate_marker) %>%
+  left_join(allFeatures %>% distinct(matched_column, .keep_all = TRUE) %>%
+              select(matched_column, `Metabolite Annotation`),
+            by = c("feature" = "matched_column"))
+
+write_csv(all_cor_results, here('./Results/DESI_Metabolite_Cytokine_Correlations.csv'))
+
+# Top 16 metabolite-cytokine pairs by adjusted p-value
+top16_cor_pairs <- all_cor_results %>%
+  filter(p.adj < 0.05) %>%
+  arrange(p.adj, desc(abs(cor))) %>%
+  distinct(feature, .keep_all = TRUE) %>%
+  slice_head(n = 16)
+
+# Generalised plotting util function 
+make_cor_scatter <- function(feature_col, marker_col, x_lab, y_lab) {
+  rho <- cor(log(FLIP_Immune_DESI[[marker_col]]),
+             log(FLIP_Immune_DESI[[feature_col]] + 1),
+             method = "spearman", use = "complete.obs")
+  ggplot(FLIP_Immune_DESI,
+    aes(x = log(.data[[marker_col]]), y = log(.data[[feature_col]] + 1))) +
+    geom_point(aes(fill = CST), alpha = 0.7, size = 2.5, shape = 21,
+      colour = "black", stroke = 0.3) +
+    geom_smooth(method = "lm", col = "firebrick4", linetype = "dashed",
+      se = FALSE, linewidth = 0.5) +
+    scale_fill_manual(values = cst_colors, name = "CST") +
+    annotate("text", x = -Inf, y = Inf, hjust = -0.15, vjust = 1.4,
+      label = paste0("ρ = ", round(rho, 3)), size = 6) +
+    labs(x = x_lab, y = y_lab) +
+    theme_custom_plot()
+}
+
+# Annotated features labelled by metabolite name, non-annotated by m/z.
+metabolite_label <- function(f) {
+  ann <- allFeatures$`Metabolite Annotation`[match(f, allFeatures$matched_column)]
+  if (is.na(ann)) paste0("m/z ", round(as.numeric(f), 4), " a.u.") else paste0(ann, " a.u.")
+}
+
+cor_scatter_plots <- pmap(top16_cor_pairs, function(feature, Marker, ...) {
+  m <- cytokine_meta[cytokine_meta$marker == Marker, ]
+  make_cor_scatter(feature, Marker,
+    x_lab = paste0("log(", m$display, " ", m$unit, ")"),
+    y_lab = paste0("log(", metabolite_label(feature), ")"))
+})
+
+cor_scatter_panel <- wrap_plots(cor_scatter_plots, ncol = 4) +
+  plot_layout(guides = "collect") + plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(size = 18, face = "bold", family = "sans"))
+
+ggsave("./Figures/Metabolomic/DESI_Metabolite_Cytokine_Correlations_Top16.png",
+  cor_scatter_panel, dpi = 300, width = 20, height = 18)
+ggsave("./Figures/Metabolomic/DESI_Metabolite_Cytokine_Correlations_Top16.svg",
+  cor_scatter_panel, dpi = 300, width = 20, height = 18)
+```
+
+## Assemble key components of DESI-MS Figure
+```{r}
+DESI_FigPanel <- roc_plot + C4_plot + IL1B_plot + FactorH_plot + DESI_markerPlot_Feature_valSer  + DESI_markerPlot_Feature_StearicAcid + 
+  DESI_markerPlot_Feature_PalmytMet + DESI_markerPlot_Feature_NervonicAcid + DESI_scatterPlot_Feature_GalabiosCer + DESI_scatterPlot_Feature_PI +
+              DESI_scatterPlot_Feature_lactoylcyst + DESI_scatterPlot_Feature_GalB 
+
+DESI_FigPanel <- DESI_FigPanel +  plot_layout(guides='collect') + plot_annotation(tag_levels = 'a') &
+                                 theme(plot.tag = element_text(size = 18, face = "bold", family = "sans"))
+
+ggsave('./Figures/Metabolomic/DESI_PanelFigure.png', DESI_FigPanel, dpi=300, width=16, height=14)
+ggsave('./Figures/Metabolomic/DESI_PanelFigure.svg', DESI_FigPanel, dpi=300, width=16, height=14)
+
+```
+
+# Leave-Group-Out (by pregnancy) Random Forest models
+Re-analysis of the models in the previous sections using grouped  (`FLIP number`) cross-validation.
+### Helper function for pregnancy-grouped CV fold
+```{r}
+make_group_folds <- function(groups, k = 7, repeats = 15, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  n <- length(groups)
+  uniq <- unique(groups)
+  index <- list()
+  indexOut <- list()
+  for (r in seq_len(repeats)) {
+    fold_of_group <- sample(rep_len(seq_len(k), length(uniq)))  
+    names(fold_of_group) <- as.character(uniq)
+    grp_fold <- fold_of_group[as.character(groups)]
+    for (f in seq_len(k)) {
+      nm <- sprintf("Rep%02d.Fold%d", r, f)
+      test_rows <- which(grp_fold == f)
+      index[[nm]] <- setdiff(seq_len(n), test_rows)  
+      indexOut[[nm]] <- test_rows                    
+    }
+  }
+  list(index = index, indexOut = indexOut)
+}
+```
+
+## LGO Random Forest classifier
+### Discrimination of Lactobacillus-dominant vs L. deplete communities (grouped CV)
+```{r}
+set.seed(325562)
+
+metaboliteColumnIdx <- 41:ncol(FLIP_DESI)
+
+dataset_train <- FLIP_DESI
+dataset_train <- dataset_train[, c("CST", colnames(dataset_train)[metaboliteColumnIdx])]
+
+keep <- rowSums(is.na(dataset_train)) < 7
+dataset_train <- dataset_train[keep, ]
+group_vec <- FLIP_DESI$`FLIP number`[keep]
+
+dataset_train$CST[grepl("IV", dataset_train$CST)] <- "IV"
+dataset_train$CST[!grepl("IV", dataset_train$CST)] <- "LDom"
+
+dataset_train$CST <- factor(dataset_train$CST, levels=c('LDom', 'IV'))
+
+folds <- make_group_folds(group_vec, k = 7, repeats = 15, seed = 325562)
+
+fit_control <- trainControl(index = folds$index, indexOut = folds$indexOut,
+                          classProbs = TRUE, summaryFunction = multiClassSummary,
+                          savePredictions = TRUE,
+                          seeds = make_caret_seeds(length(folds$index), n_models = 1, seed = 325562))
+
+train_x <- dataset_train %>% select(-CST, )
+train_y <- dataset_train$CST
+
+CST_Model_LGO <- train(x = train_x, y = train_y, method = 'rf',
+                     trControl = fit_control,
+                     preProcess = c('center', 'scale'),
+                     ntree = 1000, metric = 'AUC',
+                     tuneGrid = data.frame(mtry = floor(sqrt(ncol(train_x)))))
+
+
+modelResults_LGO <- rbind(CST_Model_LGO$results)
+
+write_csv(modelResults_LGO, './Results/DESI/RFModel_LDomvsLDepl_Results_LGO.csv')
+```
+
+### LGO ROC AUC
+```{r}
+target <- 'IV'
+
+cv_original_class_LGO <- CST_Model_LGO$pred$obs
+cv_predictor_avg_LGO <- CST_Model_LGO$pred[, target]
+roc_CST_LGO <- roc(cv_original_class_LGO, cv_predictor_avg_LGO, ci = TRUE, direction = "<")
+
+roc_ci_LGO <- as.numeric(ci(roc_CST_LGO))  # lower, AUC, upper
+
+roc_summary_LGO <- data.frame(
+  AUC = as.numeric(roc_CST_LGO$auc),
+  CI_lower = roc_ci_LGO[1],
+  CI_upper = roc_ci_LGO[3])
+
+write_csv(roc_summary_LGO, './Results/DESI/RFModel_LDomvsLDepl_ROC_LGO.txt')
+
+print(roc_summary_LGO)
+```
+
+## LGO Immune Models
+### Iterate and fit LGO RF regressor to multiple immune mediators
+```{r}
+set.seed(2563748)
+
+n_cores <- detectCores() - 1
+
+# Folds are built inside the fitting function (below) from the NA-filtered group vector, so
+# they always align to the rows actually used for training a given marker.
+
+fitRFModel_LGO <- function(marker, dataset, group_col = "FLIP number",
+                           k = 7, repeats = 15, fold_seed = 2563748) {
+
+  clean_name <- gsub(" \\(.*\\)$", "", marker) %>%
+    gsub(" ", "_", .) %>%
+    gsub("-", "", .)
+
+  metaboliteColumnIdx <- 66:ncol(dataset)
+  dataset_train <- dataset[, c(marker, colnames(dataset)[metaboliteColumnIdx])]
+  colnames(dataset_train)[1] <- 'ImmuneMarker'
+  dataset_train[, 1] <- as.numeric(dataset_train[, 1])
+  group_vec <- dataset[[group_col]]
+
+  # Drop samples with a missing cytokine measurement (ranger disallows NA in the response),
+  # keeping the pregnancy grouping aligned so grouped folds are built on the same rows.
+  keep <- !is.na(dataset_train$ImmuneMarker)
+  dataset_train <- dataset_train[keep, ]
+  group_vec <- group_vec[keep]
+
+  train_x <- dataset_train %>% select(-ImmuneMarker)
+  train_y <- dataset_train$ImmuneMarker
+
+  folds <- make_group_folds(group_vec, k = k, repeats = repeats, seed = fold_seed)
+
+  tryCatch({registerDoParallel(cores = n_cores)
+
+    fit_control <- trainControl(index = folds$index, indexOut = folds$indexOut,
+      summaryFunction = defaultSummary, savePredictions = TRUE,
+      seeds = make_caret_seeds(length(folds$index), n_models = 1, seed = 2563748))
+
+    rf_model <- train(x = train_x, y = log(train_y),
+      method = 'ranger', trControl = fit_control,
+      preProcess = c('center', 'scale'), metric = 'RMSE',
+      tuneGrid = data.frame(mtry = floor(ncol(train_x) / 3),
+        splitrule = "variance", min.node.size = 5),
+      num.trees = 1000,   num.threads = n_cores)
+
+    stopImplicitCluster()
+    registerDoSEQ()
+
+    return(list(model = rf_model,  results = cbind(Marker = clean_name,
+                                                   rf_model$results)))
+  }, error = function(e) {
+    stopImplicitCluster()
+    registerDoSEQ()
+    message(paste("Error for", marker, ":", e$message))
+    return(list(model = NULL, results = NULL))
+    })
+}
+
+all_models_lgo <- bplapply(ImmuneParams, FUN = fitRFModel_LGO,
+  dataset = FLIP_Immune_DESI, BPPARAM = SerialParam())
+
+names(all_models_lgo) <- gsub(" \\(.*\\)$", "", ImmuneParams) %>%
+  gsub(" ", "_", .) %>%
+  gsub("-", "", .)
+
+all_results_lgo <- map_df(all_models_lgo, ~.x$results) %>%
+  arrange(desc(Rsquared))
+
+print(all_results_lgo)
+
+write_csv(all_results_lgo, here('./Results/DESI/RF_ImmuneParams_Results_LGO.csv'))
+```

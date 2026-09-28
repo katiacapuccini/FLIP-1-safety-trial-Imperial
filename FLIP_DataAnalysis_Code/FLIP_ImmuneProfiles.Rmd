@@ -1,0 +1,765 @@
+---
+title: 'FLIP-1 Data Analysis - Immune response to LACTIN-V'
+output: html_document
+date: "20-03-2026"
+---
+
+```{r}
+here::i_am('./FLIP_ImmuneProfiles.Rmd')
+```
+
+# Import packages
+```{r, echo=FALSE, warning=FALSE}
+
+library(here)
+library(ggplot2)
+library(BiocParallel)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(janitor)
+library(expss)
+library(networkD3)
+library(ggalluvial)
+library(circlize)
+library(ComplexHeatmap)
+library(paletteer)
+library(ggpubr)
+library(rstatix)
+library(patchwork)
+
+dir.create(here('Results'),  showWarnings = F)
+dir.create(here('Results/Immune/'),  showWarnings = F)
+dir.create(here('Figures'), showWarnings = F)
+
+dir.create(here('Figures/Immune/Immune_Boxplots_ColvsNonCol'), recursive = TRUE, showWarnings = F)
+dir.create(here('Figures/Immune_Boxplots_T0CST'), recursive = TRUE, showWarnings = F)
+dir.create(here('Figures/VMET_FLIP_Paired'), recursive = TRUE, showWarnings = F)
+dir.create(here('Figures/VMET_FLIP_Paired_NonCSTI'), recursive = TRUE, showWarnings = F)
+```
+
+## Load data
+### FLIP
+```{r}
+FLIP_Clinical <- read_csv(here("Data/FLIP1_ClinicalData.csv"))
+
+FLIP_MicrobiomeParams <- read_csv(here("Data/Microbiome_Parameters_FLIP_VMET2.csv"))
+
+FLIP_Data <- merge(FLIP_Clinical, FLIP_MicrobiomeParams, by='Sequencing Name')
+
+FLIP_Data <- subset(FLIP_Data, `Sample Type` == "Participant sample")
+
+FLIP_Data <- FLIP_Data %>%  mutate(Outcome = case_when(Outcome == "Term" ~ "Term",
+                                                    Outcome == "iPTB" ~ "iPTB",
+                                                    Outcome == "sPTB" ~ "sPTB",
+                                                    Outcome == "SPTB" ~ "sPTB",))
+
+# Omit edge cases of pregnancy with rescue cerclage samping and T6A and T3.5
+FLIP_Data <- subset(FLIP_Data, Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E29')
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E186')
+```
+
+# Import the FLIP Immune data
+```{r}
+FLIP_Immune <- read_csv('./Data/FLIP1_ImmuneMediator_Profiles.csv')
+
+FLIP_Immune <- FLIP_Immune %>% select(-c(`Gestation`, `Sample Name`, `Timepoint`, `FLIP number`))
+
+# Merge with available data
+FLIP_Immune <- FLIP_Data %>% inner_join(FLIP_Immune, by="Sequencing Name")
+```
+
+# Load VMET2 data
+```{r}
+VMET_Clinical <- read_csv('./Data/VMET2_ComparisonCohort_ClinicalData.csv')
+
+VMET_Immune <- read_csv('./Data/VMET2_ComparisonCohort_ImmuneMediator_Profiles.csv')
+
+VMET_Immune <- VMET_Immune %>% select(-c(`Gestational Age`, `Prem Number`, `V2 Number`,  `Timepoint`))
+
+VMET_Immune <- VMET_Clinical %>% inner_join(VMET_Immune, by="SequencingID_B_Code")
+```
+
+### Unified colour scheme
+```{r}
+table(FLIP_Data$colonisation_status)
+
+
+CST_colours <-c("#004d00", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234","#800080")
+
+CST_colour_table <- rbind(table(FLIP_Data$CST), CST_colours)
+
+
+table(FLIP_Data$subCSTd)
+subCST_colour <- c("#004d00", "#228b22", "#66cdaa", "#ffcc00", "#ff8c00",
+                "#b22222", "#c62828", "#e34234", "#F28B84", "pink", "#800080")
+
+subCST_colour_table<- data.frame(rbind(table(FLIP_Data$subCST), subCST_colour))
+
+
+cst_colors_subsets <- c(
+  "I-A" = "#004d00",
+  "I-B" = "#228b22",
+  "II" = "#66cdaa",
+  "III-A" = "#ffcc00",
+  "III-B" = "#ff8c00",
+  "IV-A" = "#b22222",
+  "IV-B" = "#c62828",
+  "IV-C0" = "#e34234",
+  "IV-C2" = "#F28B84",
+  "IV-C3" = "#ffc0cb",
+  "V" = "#800080")
+
+df <- data.frame(CST = factor(names(cst_colors_subsets), levels = names(cst_colors_subsets)),
+  Color = cst_colors_subsets)
+
+subsCST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors_subsets) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),panel.grid = element_blank(),
+    legend.position = "none") +
+  labs(title = "CST subsets Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CSTsubsets.png"), subsCST_col)
+
+cst_colors <- c("I" = "#228b22", 
+               "II"= "#66cdaa",
+               "III"= "#ffcc00", 
+               "IV-A"= "#b22222", 
+               "IV-B"="#c62828",
+               "IV-C"= "#e34234",
+               "V" = "#800080")
+
+df <- data.frame( CST = factor(names(cst_colors), levels = names(cst_colors)),
+  Color = cst_colors)
+
+CST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank(), legend.position = "none") +
+  labs(title = "CST Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CST.png"), CST_col)
+```
+
+### Define a custom plotting theme to use in figure panel subplots
+```{r}
+theme_custom_plot <- function() {
+  theme_classic(base_size = 10) +
+    theme(
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      axis.ticks = element_line(colour = "black", linewidth = 0.5),
+      axis.title = element_text(size = 14, face = "plain"),  
+      axis.text = element_text(size = 12, colour = "black"),
+      legend.title = element_text(size = 14, face = "plain"),  
+      legend.text = element_text(size = 12),
+      legend.key.size = unit(0.5, "cm"),
+      legend.background = element_blank(),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 14, face = "bold"),
+      panel.background = element_blank(),
+      plot.background = element_blank(),
+      panel.grid = element_blank(),
+      plot.tag = element_text(size = 14, face = "bold")
+    )
+}
+```
+
+# Set of Immune Analytes to use
+```{r}
+ImmuneParams <- c("IL6 (DS 1.7)","IL1B (DS 0.4)", "IL8 (DS x10)", "C1q (AS 0.0335)", "C3a (AS 17.5)", 
+                  "C3b (AS 2.3875)", "C4 (AS 0.073)", "Factor H (AS)",
+                  "C2 (AS 0.17)", "C4b (AS 0.165)", "C5 (AS 0.4)", "C5a (AS 0.00175)", "Factor D (AS 0.0135)", 
+                  "MBL (AS 0.0165)", "MMP-2 (AS 54)", "MMP-8 (AS 17.1)", "MMP-9 (AS)")
+
+# Measurement unit for each analyte y-axis label.
+analyte_unit <- function(clean_name) {
+  ng_ml <- c("C1q", "C2", "C3", "C3b", "C4", "C4b", "C5",
+             "FH", "FD", "FI", "Factor H", "Factor D", "Factor I", "MBL")
+  if (clean_name %in% ng_ml) "ng/mL" else "pg/mL"
+}
+
+# y-axis label: log10(<display name> <unit>), with tidy names for IL-1beta / IL-6 / C3b.
+analyte_ylab <- function(clean_name, unit) {
+  # phantom(0) adds a gap that survives in SVG (a ~ space after the symbol beta is dropped there)
+  if (clean_name == "IL1B") return(bquote(log[10]~"(IL-1"*beta*phantom(0)*.(unit)*")"))
+  disp <- switch(clean_name, "IL6" = "IL-6", "C3b" = "C3b/iC3b", clean_name)
+  bquote(log[10]~"("*.(disp)~.(unit)*")")
+}
+
+# Paired significance bracket for the VMET/FLIP plots: returns a stat layer only when the
+# paired wilcoxon comparison is significant, else NULL (so non-significant bars are omitted
+# entirely, not merely stripped of their "ns" label).
+paired_signif_layer <- function(data, analyte_name, tp) {
+  d2 <- subset(data, Timepoint %in% tp)
+  d2$paired_val <- log10(as.numeric(d2[[analyte_name]]))
+  sig <- tryCatch(
+    ggpubr::compare_means(paired_val ~ Timepoint, data = d2,
+                          method = "wilcox.test", paired = TRUE)$p.signif[1],
+    error = function(e) "ns")
+  if (!is.na(sig) && sig != "ns") {
+    stat_compare_means(comparisons = list(tp), method = "wilcox.test",
+                       paired = TRUE, label = "p.signif", size = 3.5)
+  } else {
+    NULL
+  }
+}
+```
+
+# Data analysis
+## Immune variation accross time on Colonisers and non-colonisers
+```{r}
+responder_colour <- c("Responder" = "#619CFF", "Non-responder" = "coral")
+
+create_immune_boxplot <- function(analyte_name, data) {
+  
+  clean_name <- gsub(" \\(.*\\)$", "", analyte_name)
+  unit <- analyte_unit(clean_name)
+  if (clean_name == "C3b") clean_name <- "C3b/iC3b"
+  
+  data_with_log <- data %>%
+    mutate(log_analyte = log10(.data[[analyte_name]]))
+  
+  stat_test_analyte <- data_with_log %>%
+    group_by(Responder) %>%
+    wilcox_test(log_analyte ~ Timepoint, ref.group = "T0") %>%
+    adjust_pvalue(method = "bonferroni") %>%  
+    add_significance("p.adj") %>%
+    add_xy_position(x = "Timepoint")
+  
+  p <- ggplot(data, aes(x = Timepoint, y = log10(.data[[analyte_name]]))) + 
+    geom_boxplot(outlier.shape = NA, 
+      aes(fill = Responder), 
+      alpha = 0.6, 
+      show.legend = FALSE, 
+      linewidth = 0.4,
+      colour = "black") + 
+    geom_point(aes(fill = Responder), 
+      size = 2.5, 
+      alpha = 0.8,
+      position = position_jitter(width = 0.2),
+      shape = 21,
+      colour = "black",
+      stroke = 0.3) + 
+    scale_fill_manual(
+      values = responder_colour,
+      labels = c("Responder" = "Coloniser", "Non-responder" = "Non-coloniser"),
+      name = "LACTIN-V colonization") +   
+    stat_pvalue_manual(stat_test_analyte,
+      label = "p.adj.signif", 
+      tip.length = 0.01,
+      hide.ns = T,
+      size = 3.5) +
+    facet_wrap(~Responder, labeller = labeller(
+      Responder = c("Responder" = "Coloniser", "Non-responder" = "Non-coloniser"))) +
+    labs(y = analyte_ylab(clean_name, unit)) +
+    theme_custom_plot()
+  
+  return(p)
+}
+
+# Run on all analytes and save figures. 
+all_boxplots <- map(ImmuneParams, ~create_immune_boxplot(.x, FLIP_Immune))
+names(all_boxplots) <- ImmuneParams
+
+# Save all plots
+walk2(all_boxplots, ImmuneParams, function(plot, name) {
+  clean_filename <- gsub(" \\(.*\\)", "", name) %>%
+    gsub(" ", "_", .) %>%
+    tolower()
+  
+  ggsave(here(paste0('./Figures/Immune/Immune_Boxplots_ColvsNonCol/Immune_', clean_filename, '_boxplot.png')), 
+    plot, 
+    width = 183, 
+    height = 100, 
+    units = "mm",
+    dpi = 300)})
+```
+
+
+## Immune variation accross time, CST transition pregnancies vs CST stable
+```{r}
+# Colors
+cst_t0_colors <- c("CST I" = "#228b22", "Other" = "darkorange3")
+
+# Nature journal theme
+theme_nature <- function() {
+  theme_classic(base_size = 10) +
+    theme(
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      axis.ticks = element_line(colour = "black", linewidth = 0.5),
+      axis.title = element_text(size = 11, face = "plain"),
+      axis.text = element_text(size = 10, colour = "black"),
+      legend.title = element_text(size = 11, face = "plain"),
+      legend.text = element_text(size = 10),
+      legend.key.size = unit(0.5, "cm"),
+      legend.background = element_blank(),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 11, face = "bold"),
+      panel.background = element_blank(),
+      plot.background = element_blank(),
+      panel.grid = element_blank(),
+      plot.tag = element_text(size = 14, face = "bold")
+    )
+}
+
+# Prepare data
+FLIP_StartingCST <- FLIP_Immune %>%
+  group_by(`FLIP number`) %>%
+  filter(any(Timepoint == "T0")) %>%
+  arrange(Timepoint) %>%
+  mutate(
+    CST_at_T0 = first(CST[Timepoint == "T0"]),
+    CST_I_at_T0 = ifelse(CST_at_T0 == "I", "CST I", "Other")
+  ) %>%
+  ungroup()
+
+# Function to create CST at T0 boxplots
+create_cst_t0_boxplot <- function(analyte_name, data) {
+  
+  clean_name <- gsub(" \\(.*\\)$", "", analyte_name)
+  unit <- analyte_unit(clean_name)
+  if (clean_name == "C3b") clean_name <- "C3b/iC3b"
+  
+  data_with_log <- data %>%
+    mutate(log_analyte = log10(.data[[analyte_name]]))
+  
+  stat_test_analyte <- data_with_log %>%
+    group_by(CST_I_at_T0) %>%
+    wilcox_test(log_analyte ~ Timepoint, ref.group = "T0") %>%
+    adjust_pvalue(method = "bonferroni") %>%  
+    add_significance("p.adj") %>%
+    add_xy_position(x = "Timepoint")
+  
+  p <- ggplot(data, aes(x = Timepoint, y = log10(.data[[analyte_name]]))) + 
+    geom_boxplot(
+      outlier.shape = NA, 
+      aes(fill = CST_I_at_T0), 
+      alpha = 0.6, 
+      show.legend = FALSE, 
+      linewidth = 0.4,
+      colour = "black"
+    ) + 
+    geom_point(
+      aes(fill = CST), 
+      size = 2.5,
+      alpha = 0.8,
+      position = position_jitter(width = 0.2),
+      shape = 21,
+      colour = "black",
+      stroke = 0.3
+    ) + 
+    scale_fill_manual(
+      values = c(cst_colors, cst_t0_colors), 
+      breaks = names(cst_colors), 
+      name = "CST"
+    ) +  
+    stat_pvalue_manual(
+      stat_test_analyte,
+      label = "p.adj.signif",
+      tip.length = 0.01,
+      hide.ns = TRUE,
+      size = 3.5
+    ) +
+    facet_wrap(~CST_I_at_T0) +
+    labs(y = analyte_ylab(clean_name, unit)) +
+    theme_nature()
+  
+  return(p)
+}
+
+# Create all boxplots
+all_cst_t0_boxplots <- map(ImmuneParams, ~create_cst_t0_boxplot(.x, FLIP_StartingCST))
+names(all_cst_t0_boxplots) <- ImmuneParams
+
+# Save all plots
+walk2(all_cst_t0_boxplots, ImmuneParams, function(plot, name) {
+  clean_filename <- gsub(" \\(.*\\)$", "", name) %>%
+    gsub(" ", "_", .) %>%
+    tolower()
+  
+  # Save as PDF (Nature preferred)
+  ggsave(
+    here(paste0('./Figures/Immune_Boxplots_T0CST/Immune_', clean_filename, '_t0cst_boxplot.pdf')), 
+    plot, 
+    width = 183, 
+    height = 100, 
+    units = "mm",
+    device = cairo_pdf
+  )
+  
+  # Save as PNG
+  ggsave(
+    here(paste0('./Figures/Immune_Boxplots_T0CST/Immune_', clean_filename, '_t0cst_boxplot.png')), 
+    plot, 
+    width = 183, 
+    height = 100, 
+    units = "mm",
+    dpi = 300
+  )
+})
+
+```
+
+
+## Assembled panel: colonisation (a) + CST-at-T0 (b) for 5 analytes
+```{r}
+panel_analytes <- c("IL1B (DS 0.4)", "IL6 (DS 1.7)", "C4 (AS 0.073)",
+                    "C3a (AS 17.5)", "C3b (AS 2.3875)")   
+n_panel <- length(panel_analytes)
+
+# individual plot formatting function
+prep_member <- function(p, is_top, is_bottom, drop_legend = FALSE) {
+  p <- p + theme(axis.title.y = element_text(size = 9))
+  if (drop_legend) p <- p + theme(legend.position = "none")
+  if (is_top) p <- p + theme(strip.text = element_text(size = 10, face = "bold"))
+  else        p <- p + theme(strip.text = element_blank())
+  if (!is_bottom) p <- p + theme(axis.title.x = element_blank(),
+                                 axis.text.x  = element_blank(),
+                                 axis.ticks.x = element_blank())
+  p
+}
+
+# Panel a: colonisation boxplots
+col_a_plots <- lapply(seq_len(n_panel), function(i) {
+  p <- prep_member(all_boxplots[[panel_analytes[i]]],
+                   is_top = i == 1, is_bottom = i == n_panel, drop_legend = TRUE)
+  if (i == 1) p <- p + ggtitle("LACTIN-V colonisation") + labs(tag = "a") +
+    theme(plot.title = element_text(hjust = 0.5, size = 12, face = "plain"))
+  p
+})
+col_a <- wrap_plots(col_a_plots, ncol = 1)
+
+# Panel b: CST-at-T0 boxplots
+col_b_plots <- lapply(seq_len(n_panel), function(i) {
+  p <- prep_member(all_cst_t0_boxplots[[panel_analytes[i]]],
+                   is_top = i == 1, is_bottom = i == n_panel)
+  if (i == 1) p <- p + labs(tag = "b")
+  p
+})
+col_b <- wrap_plots(col_b_plots, ncol = 1, guides = "collect")
+
+# Assemble figure
+immune_panel <- wrap_plots(col_a, col_b, guides = "collect") &
+  theme(plot.tag = element_text(size = 18, face = "bold", family = "sans"))
+
+ggsave(here('./Figures/Immune/Immune_Panel_Colonisation_vs_CST.png'),
+  immune_panel, width = 200, height = 350, units = "mm", dpi = 300)
+ggsave(here('./Figures/Immune/Immune_Panel_Colonisation_vs_CST.pdf'),
+  immune_panel, width = 200, height = 350, units = "mm", device = cairo_pdf)
+ggsave(here('./Figures/Immune/Immune_Panel_Colonisation_vs_CST.svg'),
+  immune_panel, width = 200, height = 350, units = "mm",
+  device = svglite::svglite, fix_text_size = FALSE)
+```
+
+# Comparison between VMET-2 and FLIP-1
+```{r}
+# Prepare data
+FLIP_paired <- FLIP_Immune %>%
+  filter(Timepoint %in% c("T0", "T3")) %>%
+  group_by(`FLIP number`) %>%
+  filter(n() == 2) %>%  
+  mutate(
+    CST_at_T0 = first(CST[Timepoint == "T0"]),
+    CST_I_at_T0 = ifelse(CST_at_T0 == "I", "CST I", "Other")
+  ) %>%
+  ungroup()
+
+FLIP_paired$`IL1b (AS)` <- as.numeric(FLIP_paired$`IL1b (AS)`)
+
+FLIP_paired_responders <- FLIP_paired # %>% filter(CST_I_at_T0 == "Other")
+
+study_colors <- c("VMET-2" = "orchid4", "FLIP" = "forestgreen")
+
+vmet_to_flip_mapping <- list(
+  "IL-1B (AS 0.4)" = "IL1B (DS 0.4)",
+  "C4 (AS)" = "C4 (AS 0.073)",
+  "FH (AS)" = "Factor H (AS)",
+  "FD (AS 0.0135)" = "Factor D (AS 0.0135)", 
+  "IL-6 (AS 0.85)" = "IL6 (AS)",
+  "IL-8 (AS)" = "IL8 (AS)",
+  "C1q (AS 0.0335)" = "C1q (AS 0.0335)",
+  "C3a (AS)" = "C3a (AS 17.5)",
+  "C3 (AS 0.11)" = "C3 (AS 0.11)",
+  "C3b (AS 2.3875)" = "C3b (AS 2.3875)",
+  "C2 (AS)" = "C2 (AS 0.17)",
+  "C4b (AS 0.165)" = "C4b (AS 0.165)",
+  "C5 (AS 0.4)" = "C5 (AS 0.4)",
+  "C5a (AS 0.00175)" = "C5a (AS 0.00175)",
+  "MBL (AS 0.0165)" = "MBL (AS 0.0165)",
+  "FI (AS 0.09)" = "Factor I (AS 0.09)",
+  "MMP-2 (AS 54)" = "MMP-2 (AS 54)",
+  "MMP-8 (AS 17.1)" = "MMP-8 (AS 17.1)",
+  "MMP-9 (AS)" = "MMP-9 (AS)"
+)
+
+# Function to create VMET paired plot
+create_vmet_paired_plot <- function(analyte_name, data) {
+  clean_name <- gsub(" \\(.*\\)$", "", analyte_name)
+  unit <- analyte_unit(clean_name)
+  if (clean_name == "C3b") clean_name <- "C3b/iC3b"
+  
+  # Replace FH, FD, FI, and IL-1B with proper names
+  if (clean_name == "FH") {
+    clean_name <- "Factor H"
+    y_label <- bquote(log[10]~"(Factor H ng/mL)")
+  } else if (clean_name == "FD") {
+    clean_name <- "Factor D"
+    y_label <- bquote(log[10]~"(Factor D ng/mL)")
+  } else if (clean_name == "FI") {
+    clean_name <- "Factor I"
+    y_label <- bquote(log[10]~"(Factor I ng/mL)")
+  } else if (clean_name == "IL-1B") {
+    y_label <- bquote(log[10]~"(IL-1"*beta~.(unit)*")")
+  } else {
+    y_label <- bquote(log[10]~"("*.(clean_name)~.(unit)*")")
+  }
+  
+  ggplot(
+    subset(data, Timepoint %in% c("A", "B")),
+    aes(x = Timepoint, y = log10(as.numeric(.data[[analyte_name]])))
+  ) +
+    geom_line(
+      aes(group = `V2 Number`),
+      colour = study_colors[["VMET-2"]],
+      alpha = 0.4,
+      linetype = "dashed",
+      linewidth = 0.4
+    ) +
+    geom_point(
+      aes(fill = "VMET-2"),
+      size = 2.5,
+      shape = 21,
+      colour = "black",
+      stroke = 0.3,
+      show.legend = FALSE
+    ) +
+    # Invisible reference layer carrying both studies so the shared legend shows both keys
+    geom_point(
+      data = data.frame(
+        Timepoint = subset(data, Timepoint %in% c("A", "B"))$Timepoint[1],
+        yy = median(log10(as.numeric(data[[analyte_name]])), na.rm = TRUE),
+        Study = c("VMET-2", "FLIP")
+      ),
+      aes(x = Timepoint, y = yy, fill = Study),
+      shape = 21, size = 2.5, colour = "black", stroke = 0.3,
+      alpha = 0, inherit.aes = FALSE
+    ) +
+    paired_signif_layer(data, analyte_name, c("A", "B")) +
+    scale_fill_manual(
+      name = "Study",
+      values = study_colors,
+      limits = c("VMET-2", "FLIP"),
+      drop = FALSE
+    ) +
+    guides(fill = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+    labs(y = y_label) +
+    theme_custom_plot()
+}
+
+# Function to create FLIP paired plot
+create_flip_paired_plot <- function(analyte_name, data) {
+  clean_name <- gsub(" \\(.*\\)$", "", analyte_name)
+  unit <- analyte_unit(clean_name)
+  if (clean_name == "C3b") clean_name <- "C3b/iC3b"
+  
+  # Check for IL1B (FLIP version) and convert to IL-1β
+  if (clean_name == "IL1B") {
+    y_label <- bquote(log[10]~"(IL-1"*beta~.(unit)*")")
+  } else {
+    y_label <- bquote(log[10]~"("*.(clean_name)~.(unit)*")")
+  }
+  
+  ggplot(data, aes(x = Timepoint, y = log10(as.numeric(.data[[analyte_name]])))) +
+    geom_line(
+      aes(group = `FLIP number`),
+      colour = study_colors[["FLIP"]],
+      alpha = 0.4,
+      linetype = "dashed",
+      linewidth = 0.4
+    ) +
+    geom_point(
+      aes(fill = "FLIP"),
+      size = 2.5,
+      shape = 21,
+      colour = "black",
+      stroke = 0.3,
+      show.legend = FALSE
+    ) +
+    paired_signif_layer(data, analyte_name, c("T0", "T3")) +
+    scale_fill_manual(
+      name = "Study",
+      values = study_colors,
+      limits = c("VMET-2", "FLIP"),
+      drop = FALSE
+    ) +
+    guides(fill = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+    labs(y = y_label) +
+    theme_custom_plot()
+}
+
+# Create all VMET plots
+vmet_analytes <- names(vmet_to_flip_mapping)
+vmet_paired_plots <- map(vmet_analytes, ~create_vmet_paired_plot(.x, VMET_Immune))
+names(vmet_paired_plots) <- vmet_analytes
+
+# Create all FLIP plots
+flip_analytes <- unlist(vmet_to_flip_mapping, use.names = FALSE)
+flip_paired_plots <- map(flip_analytes, ~create_flip_paired_plot(.x, FLIP_paired_responders))
+names(flip_paired_plots) <- flip_analytes
+
+# Save individual combined plots (VMET + FLIP side by side)
+walk(vmet_analytes, function(vmet_name) {
+  flip_name <- vmet_to_flip_mapping[[vmet_name]]
+  
+  combined_plot <- vmet_paired_plots[[vmet_name]] + flip_paired_plots[[flip_name]] +
+    plot_layout(guides = "collect")
+  
+  clean_filename <- gsub(" \\(.*\\)$", "", vmet_name) %>%
+    gsub(" ", "_", .) %>%
+    gsub("-", "", .) %>%
+    tolower()
+  
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired/', clean_filename, '_vmet_vs_flip.pdf')),
+    combined_plot,
+    width = 183,
+    height = 90,
+    units = "mm",
+    device = cairo_pdf)
+  
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired/', clean_filename, '_vmet_vs_flip.png')),
+    combined_plot,
+    width = 183,
+    height = 90,
+    units = "mm",
+    dpi = 300)
+  
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired/', clean_filename, '_vmet_vs_flip.svg')),
+    combined_plot,
+    width = 183,
+    height = 90,
+    units = "mm",
+    dpi = 300,
+    device = svglite::svglite,
+    fix_text_size = FALSE)
+})
+
+```
+
+## Assembled VMET-2 vs FLIP paired panel (analytes b–g; 16S panel a added separately)
+```{r}
+# Panel rows: (b, c) / (d, e) / (f, g); keys are the VMET analyte names
+vmet_panel_analytes <- c("IL-1B (AS 0.4)", "IL-6 (AS 0.85)",
+                         "C4 (AS)",        "C3a (AS)",
+                         "C3b (AS 2.3875)", "FH (AS)")
+vmet_panel_tags <- c("b", "c", "d", "e", "f", "g")
+
+# One VMET | FLIP pair per analyte, tag on the VMET (left) subplot
+vmet_flip_pairs <- lapply(seq_along(vmet_panel_analytes), function(i) {
+  vmet_name <- vmet_panel_analytes[i]
+  flip_name <- vmet_to_flip_mapping[[vmet_name]]
+  (vmet_paired_plots[[vmet_name]] + labs(tag = vmet_panel_tags[i])) +
+    flip_paired_plots[[flip_name]]
+})
+
+# 6 pairs in a 3 x 2 grid, single collected "Study" legend on the right
+vmet_flip_panel <- wrap_plots(vmet_flip_pairs, ncol = 2, guides = "collect") &
+  theme(plot.tag = element_text(size = 16, face = "bold", family = "sans"))
+
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Paired_Panel.png'),
+  vmet_flip_panel, width = 240, height = 260, units = "mm", dpi = 300)
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Paired_Panel.pdf'),
+  vmet_flip_panel, width = 240, height = 260, units = "mm", device = cairo_pdf)
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Paired_Panel.svg'),
+  vmet_flip_panel, width = 240, height = 260, units = "mm",
+  device = svglite::svglite, fix_text_size = FALSE)
+```
+
+## Full figure: 16S sankey (panel a) imported from Microbiome_Figures.Rmd + paired panel (b–g)
+```{r}
+# Panel a is the VMET-2 / FLIP CST-transition sankey built in Microbiome_Figures.Rmd and
+# saved there as an .rds ggplot/patchwork object — imported natively here so it stays vector.
+# (Requires ggalluvial to be loaded to render the geom_flow/geom_stratum layers.)
+panel_a <- readRDS(here('Figures/Microbiome_VMETFLIPSankey.rds'))
+panel_a[[1]] <- panel_a[[1]] + labs(tag = "a")   # "a" tag on the VMET2 (left) sankey
+
+# Keep the sankey at its native (wide) aspect: place it top-left at ~2/3 width with an
+# empty spacer on the right, and give the top row ~1 paired-row of height.
+top_row <- wrap_plots(panel_a, plot_spacer(), widths = c(2, 1))
+full_immune_figure <- wrap_plots(top_row, vmet_flip_panel, ncol = 1, heights = c(1, 2.7)) &
+  theme(plot.tag = element_text(size = 16, face = "bold", family = "sans"))
+
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Full_Figure.png'),
+  full_immune_figure, width = 240, height = 350, units = "mm", dpi = 300)
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Full_Figure.pdf'),
+  full_immune_figure, width = 240, height = 350, units = "mm", device = cairo_pdf)
+ggsave(here('./Figures/VMET_FLIP_Paired/VMET_FLIP_Full_Figure.svg'),
+  full_immune_figure, width = 240, height = 350, units = "mm",
+  device = svglite::svglite, fix_text_size = FALSE)
+```
+
+# Paired Plots (non-CST-I subset)
+```{r}
+# Same polished VMET/FLIP paired plots as the main chunk above (reuses create_vmet_paired_plot /
+# create_flip_paired_plot, vmet_to_flip_mapping and study_colors defined there), but the FLIP side
+# is restricted to participants that were NOT CST I at T0. Saved to VMET_FLIP_Paired_NonCSTI/.
+FLIP_paired <- FLIP_Immune %>%
+  filter(Timepoint %in% c("T0", "T3")) %>%
+  group_by(`FLIP number`) %>%
+  filter(n() == 2) %>%  
+  mutate( CST_at_T0 = first(CST[Timepoint == "T0"]),
+    CST_I_at_T0 = ifelse(CST_at_T0 == "I", "CST I", "Other")) %>%
+  ungroup()
+
+FLIP_paired$`IL1b (AS)` <- as.numeric(FLIP_paired$`IL1b (AS)`)
+
+FLIP_paired_responders <- FLIP_paired  %>% 
+  # filter(Responder == "Responder")
+  filter(CST_I_at_T0 == "Other")
+
+# Create all VMET plots
+vmet_analytes <- names(vmet_to_flip_mapping)
+vmet_paired_plots <- map(vmet_analytes, ~create_vmet_paired_plot(.x, VMET_Immune))
+names(vmet_paired_plots) <- vmet_analytes
+
+# Create all FLIP plots
+flip_analytes <- unlist(vmet_to_flip_mapping, use.names = FALSE)
+flip_paired_plots <- map(flip_analytes, ~create_flip_paired_plot(.x, FLIP_paired_responders))
+names(flip_paired_plots) <- flip_analytes
+
+# Save individual combined plots (VMET + FLIP side by side)
+walk(vmet_analytes, function(vmet_name) {
+  flip_name <- vmet_to_flip_mapping[[vmet_name]]
+  
+  combined_plot <- vmet_paired_plots[[vmet_name]] + flip_paired_plots[[flip_name]] +
+    plot_layout(guides = "collect")
+
+  clean_filename <- gsub(" \\(.*\\)$", "", vmet_name) %>%
+    gsub(" ", "_", .) %>%
+    gsub("-", "", .) %>%
+    tolower()
+
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired_NonCSTI/', clean_filename, '_vmet_vs_flip.pdf')),
+    combined_plot, width = 183, height = 90, units = "mm", device = cairo_pdf)
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired_NonCSTI/', clean_filename, '_vmet_vs_flip.png')),
+    combined_plot, width = 183, height = 90, units = "mm", dpi = 300)
+  ggsave(here(paste0('./Figures/VMET_FLIP_Paired_NonCSTI/', clean_filename, '_vmet_vs_flip.svg')),
+    combined_plot, width = 183, height = 90, units = "mm",
+    device = svglite::svglite, fix_text_size = FALSE)
+})
+
+```

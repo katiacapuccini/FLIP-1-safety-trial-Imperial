@@ -1,0 +1,729 @@
+---
+title: 'FLIP-1 Data Analysis  - Microbiome Transitions'
+output: html_document
+date: ""
+---
+
+```{r}
+here::i_am('./Microbiome_Figures.Rmd')
+```
+
+# Import packages
+```{r, echo=FALSE, warning=FALSE}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(janitor)
+library(expss)
+library(networkD3)
+library(ggalluvial)
+library(circlize)
+library(ComplexHeatmap)
+library(ggpubr)
+library(paletteer)
+library(rstatix)
+library(patchwork)
+
+
+dir.create(here('Results'),  showWarnings = F)
+dir.create(here('Results/Microbiome/'),  showWarnings = F)
+dir.create(here('Figures'), showWarnings = F)
+```
+
+
+## Load data
+### FLIP
+```{r}
+FLIP_Clinical <- read_csv(here("Data/FLIP1_ClinicalData.csv"))
+# FLIP <-clean_names(FLIP)
+
+FLIP_MicrobiomeParams <- read_csv(here("Data/Microbiome_Parameters_FLIP_VMET2.csv"))
+
+FLIP_Data <- merge(FLIP_Clinical, FLIP_MicrobiomeParams, by='Sequencing Name')
+
+FLIP_Data <- subset(FLIP_Data, `Sample Type` == "Participant sample")
+
+FLIP_Data <- FLIP_Data %>%  mutate(Outcome = case_when(Outcome == "Term" ~ "Term",
+                                                    Outcome == "iPTB" ~ "iPTB",
+                                                    Outcome == "sPTB" ~ "sPTB",
+                                                    Outcome == "SPTB" ~ "sPTB",))
+
+# Omit edge cases of pregnancy with rescue cerclage samping and T6A and T3.5
+FLIP_Data <- subset(FLIP_Data, Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E29')
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E186')
+```
+
+# Import the VMET Data
+```{r}
+VMET_Data <- read_csv(here("Data/VMET2_ComparisonCohort_ClinicalData.csv"))
+
+VMET_Data <- merge(VMET_Data, FLIP_MicrobiomeParams, by='Sequencing Name')
+```
+
+# Import the 16S data counts matrix
+```{r}
+species_16S <- read_tsv('./Data/16S Data/Species/table.tsv', skip = 1)
+
+Matrix_16S <- t(species_16S[, 2:ncol(species_16S)])
+colnames(Matrix_16S) <- species_16S$`#OTU ID`
+rownames(Matrix_16S) <- NULL
+species_16S <- as_tibble(cbind(`Sequencing Name` = colnames(species_16S[, 2:ncol(species_16S)]), Matrix_16S))
+
+# Keep FLIP only, raw counts not used for VMET2
+FLIP_16S <- merge(FLIP_Data, species_16S, by="Sequencing Name")
+
+rm(Matrix_16S)
+```
+
+### Unified colour scheme
+```{r}
+table(FLIP_Data$colonisation_status)
+
+
+CST_colours <-c("#004d00", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234","#800080")
+
+CST_colour_table <- rbind(table(FLIP_Data$CST), CST_colours)
+
+
+table(FLIP_Data$subCSTd)
+subCST_colour <- c("#004d00", "#228b22", "#66cdaa", "#ffcc00", "#ff8c00",
+                "#b22222", "#c62828", "#e34234", "#F28B84", "pink", "#800080")
+
+subCST_colour_table<- data.frame(rbind(table(FLIP_Data$subCST), subCST_colour))
+
+
+cst_colors_subsets <- c(
+  "I-A" = "#004d00",
+  "I-B" = "#228b22",
+  "II" = "#66cdaa",
+  "III-A" = "#ffcc00",
+  "III-B" = "#ff8c00",
+  "IV-A" = "#b22222",
+  "IV-B" = "#c62828",
+  "IV-C0" = "#e34234",
+  "IV-C2" = "#F28B84",
+  "IV-C3" = "#ffc0cb",
+  "V" = "#800080")
+
+df <- data.frame(
+  CST = factor(names(cst_colors_subsets), levels = names(cst_colors_subsets)),
+  Color = cst_colors_subsets)
+
+subsCST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors_subsets) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),panel.grid = element_blank(),
+    legend.position = "none") +
+  labs(title = "CST subsets Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CSTsubsets.png"), subsCST_col)
+
+
+cst_colors <- c("I" = "#228b22", 
+               "II"= "#66cdaa",
+               "III"= "#ffcc00", 
+               "IV-A"= "#b22222", 
+               "IV-B"="#c62828",
+               "IV-C"= "#e34234",
+               "V" = "#800080")
+
+df <- data.frame( CST = factor(names(cst_colors), levels = names(cst_colors)),
+  Color = cst_colors)
+
+CST_col <- ggplot(df, aes(x = CST, y = 1, fill = CST, label = Color)) +
+  geom_col() +
+  geom_text(color = "black", hjust = -0.1) +
+  scale_fill_manual(values = cst_colors) +
+  coord_flip() +
+  theme_minimal() +
+  theme(axis.title = element_blank(),
+    axis.text.x = element_blank(),
+    panel.grid = element_blank(), legend.position = "none") +
+  labs(title = "CST Colors with Hex Codes") +
+  ylim(0, 1.5)
+
+
+#ggsave(here("Figures/Color_palette_CST.png"), CST_col)
+```
+
+### Define a custom plotting theme to use in figure panel subplots
+```{r}
+theme_custom_plot <- function() {
+  theme_classic(base_size = 10) +
+    theme(
+      axis.line = element_line(colour = "black", linewidth = 0.5),
+      axis.ticks = element_line(colour = "black", linewidth = 0.5),
+      axis.title = element_text(size = 14, face = "plain"),  
+      axis.text = element_text(size = 12, colour = "black"),
+      legend.title = element_text(size = 14, face = "plain"),  
+      legend.text = element_text(size = 12),
+      legend.key.size = unit(0.5, "cm"),
+      legend.background = element_blank(),
+      strip.background = element_blank(),
+      strip.text = element_text(size = 14, face = "bold"),
+      panel.background = element_blank(),
+      plot.background = element_blank(),
+      panel.grid = element_blank(),
+      plot.tag = element_text(size = 14, face = "bold")
+    )
+}
+```
+
+## Dotplot of sampling distribution
+### FLIP
+```{r, warning=FALSE}
+table(FLIP_Data$CST)
+
+sampling_dotplot_gest_age <- ggplot(FLIP_Data, aes(x=`Gestational Age (weeks)`, y=`FLIP number`)) +
+        geom_point(aes(x=`Gestational Age (weeks)`, 
+                       color = CST), size = 3, alpha = 0.8)+ 
+        scale_colour_manual(values = c( "#228b22", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234","#800080")) +
+        xlab("Gestational age (weeks)")+ ylab("Pregnancy ID") +
+        facet_grid(Outcome ~ ., scales = "free", space = "free")+
+        guides(colour=guide_legend(title="VALENCIA CST")) + theme_light()+ 
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1))    
+
+
+#ggsave(here("Figures", "dotplot_FLIP_only_GestAge.png"), sampling_dotplot_gest_age, width =7, height = 15, dpi = 200, units = "in", device='png')
+
+
+FLIP_ordered <- FLIP_Data %>% mutate(test = paste(Timepoint, CST, sep = "_"))  
+
+table(FLIP_ordered$subCST)
+
+FLIP_t0 <- FLIP_Data %>%  mutate(order = case_when( Timepoint == "T0" & subCST == "I-A"   ~ 1,
+                                                    Timepoint == "T0" & subCST == "I-B"   ~ 2,
+                                                    Timepoint == "T0" & subCST == "II"    ~ 3,
+                                                    Timepoint == "T0" & subCST == "III-A" ~ 4,
+                                                    Timepoint == "T0" & subCST == "III-B" ~ 5,
+                                                    Timepoint == "T0" & subCST == "IV-A"  ~ 6,
+                                                    Timepoint == "T0" & subCST == "IV-B"  ~ 7,
+                                                    Timepoint == "T0" & subCST == "IV-C0" ~ 8,
+                                                    Timepoint == "T0" & subCST == "IV-C2" ~ 9,
+                                                    Timepoint == "T0" & subCST == "IV-C3" ~ 10,
+                                                    Timepoint == "T0" & subCST == "V"     ~ 11))
+
+
+# Arrange and filter to get unique flip_number levels based on order
+unique_flip_numbers <- FLIP_t0 %>%
+  arrange(desc(order)) %>%
+  distinct(`FLIP number`, .keep_all = TRUE) %>%
+  pull(`FLIP number`)
+
+# Now set flip_number as a factor with levels in the correct order
+FLIP_t0$`FLIP number` <- factor(FLIP_t0$`FLIP number`, levels = unique_flip_numbers)
+FLIP_ord_subset <- FLIP_t0[complete.cases(FLIP_t0[, c("Timepoint", "FLIP number", "subCST", "colonisation_status")]), ]
+nrow(FLIP_ord_subset)
+
+FLIP_ord <- FLIP_t0
+  
+colonisation_status<- as.factor(FLIP_ord$colonisation_status)
+
+dotPlot_FLIP <- ggplot(FLIP_ord, aes(x = Timepoint, y = `FLIP number`, color = subCST, 
+                            shape = colonisation_status)) +  geom_point(size = 4, alpha = 0.8) +
+scale_colour_manual(values = c("#004d00", "#228b22","#66cdaa","#ffcc00", "#ff8c00", "#b22222","#c62828", "#e34234", "#F28B84","#ffc0cb", "#800080", "gray")) +
+  scale_shape_manual(values = c("non-coloniser" = 16, "coloniser" = 17),
+  labels = c("non-coloniser" = "No", "coloniser" = "Yes"), name = "LACTIN-V detected") + 
+  xlab("Timepoint") +  ylab("Pregnancy ID") +  
+  facet_grid(Outcome ~ ., scales = "free", space = "free") + 
+  guides(colour = guide_legend(title = "Valencia CST"), 
+         shape = guide_legend(title = "LACTIN-V detected")) + theme_light() +
+ theme(text = element_text(size = 20), axis.title.x = element_text(size = 18))
+ 
+
+# ggsave(here("Figures/dotplot_FLIP.png"), dotPlot_FLIP, width = 9, height = 15, dpi = 400)
+# ggsave(here("Figures/dotplot_FLIP.svg"), dotPlot_FLIP, width = 9, height = 15, dpi = 400)
+```
+
+### VMET2
+```{r}
+sampling_dotplot_gest_age <- ggplot(VMET_Data, aes(x=`Gestational Age (weeks)`, y=as.factor(`V2 Number`))) +
+        geom_point(aes(x= VMET_Data$`Gestational Age (weeks)`, 
+                       color = VMET_Data$CST), size = 3, alpha = 0.8)+ 
+        scale_colour_manual(values = c( "#228b22", "#66cdaa","#ffcc00","#c62828", "#e34234","#800080")) +
+        xlab("Gestational age (weeks)")+ ylab("Pregnancy ID") +
+        facet_grid(Outcome ~ ., scales = "free", space = "free")+
+        guides(colour=guide_legend(title="Valencia CST")) + theme_light()+ 
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1))    
+
+
+VMET_ordered <- VMET_Data %>%  
+                mutate(order = case_when( Timepoint == "A" & subCST == "I-A"   ~ 1,
+                                          Timepoint == "A" & subCST == "I-B"   ~ 2,
+                                          Timepoint == "A" & subCST == "II"    ~ 3,
+                                          Timepoint == "A" & subCST == "III-A" ~ 4,
+                                          Timepoint == "A" & subCST == "III-B" ~ 5,
+                                          Timepoint == "A" & subCST == "IV-B"  ~ 6,
+                                          Timepoint == "A" & subCST == "IV-C0" ~ 7,
+                                          Timepoint == "A" & subCST == "IV-C2" ~ 8,
+                                          Timepoint == "A" & subCST == "IV-C3" ~ 9,
+                                          Timepoint == "A" & subCST == "V"     ~ 10))
+
+
+#write.csv(VMET_ordered, here("VMET_ordered_test_reprocessed.csv"))
+# VMET_ordered <- read_csv(here("VMET_ordered_test_reprocessed.csv"))
+
+# Arrange and filter to get unique flip_number levels based on order
+unique_numbers <- VMET_ordered %>%
+  arrange(desc(order)) %>%
+  distinct(`V2 Number`, .keep_all = TRUE) %>%
+  pull(`V2 Number`)
+
+# Now set flip_number as a factor with levels in the correct order
+VMET_ordered$`V2 Number` <- factor(VMET_ordered$`V2 Number`, levels = unique_numbers)
+#VMET_ordered_subset <- VMET_ordered[complete.cases(VMET_ordered[, c("timepoint", "v2_number", "CST_reprocessed")])]
+#nrow(VMET_ordered_subset)
+
+table(VMET_ordered$subCST)
+
+PairedDotPlot_A <- ggplot(VMET_ordered, aes(x=Timepoint, y= as.factor(`V2 Number`))) +
+        geom_point(aes(x= Timepoint, color = subCST), size = 3, alpha = 0.8)+ 
+        scale_colour_manual(values = c("#004d00", "#228b22","#66cdaa","#ffcc00", "#ff8c00", "#c62828", "#e34234", "#F28B84", "#ffc0cb", "#800080")) +
+        xlab("Gestational age (weeks)")+ ylab("Pregnancy ID") +
+        facet_grid(Outcome ~ ., scales = "free", space = "free", 
+                   labeller = labeller(`Outcome`= c("Term" = "Term", "sPTB" = "sPTB")))+
+        guides(colour=guide_legend(title="Valencia CST")) + theme_light()+
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1), legend.position = "none")+ ggtitle("VMET-2")
+ 
+  
+ 
+FLIP_subs <- FLIP_ord %>% filter(Timepoint == "T0" | Timepoint == "T3")
+table(FLIP_subs$subCST)  
+
+
+PairedDotPlot_B <- ggplot(FLIP_subs, aes(x=Timepoint, y= `FLIP number`))+
+        geom_point(aes(x= Timepoint, color = subCST), size = 3, alpha = 0.8)+ 
+        scale_colour_manual(values = c("#004d00", "#228b22","#66cdaa","#ffcc00", "#ff8c00", "#c62828", "#e34234", "#ffc0cb", "#800080")) +
+        xlab("Gestational age (weeks)")+ ylab("Pregnancy ID") +
+        facet_grid(Outcome ~ ., scales = "free", space = "free")+
+        guides(colour=guide_legend(title="Valencia CST")) + theme_light()+
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1))+ ggtitle("FLIP")  
+ 
+Paired_Dotplot_FLIP_VMET2 <- (PairedDotPlot_A + PairedDotPlot_B)
+
+#ggsave(here("Figures", "VMET_FLIP_selected_timepoints.png"), A+B, width =9, height = 15, dpi = 400, units = "in", device='png')
+```
+
+# Data Analysis
+## Distribution of CSTs across timepoints
+### Sankey plot FLIP
+```{r}
+FLIP_sankey <- FLIP_ord %>% select(`FLIP number`, Timepoint, Outcome, CST)
+
+table(FLIP_sankey$CST)
+
+wide_data <- FLIP_sankey %>%
+  rename(subject = `FLIP number`,   # Use your actual subject ID column name
+         CST = CST) %>%
+  select(subject, Timepoint, CST) %>%
+  distinct() %>%
+  pivot_wider(names_from = Timepoint, values_from = CST)
+  
+  long_alluvial <- wide_data %>%
+  pivot_longer(cols = starts_with("T"),
+    names_to = "Timepoint",
+    values_to = "CST") %>%
+  arrange(subject, Timepoint)
+
+
+sankey_FLIP <- ggplot(long_alluvial,
+       aes(x = Timepoint, stratum = CST, alluvium = subject,
+           fill = CST, label = CST)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback",
+            color = "darkgray") +
+  geom_stratum() +
+  scale_fill_manual(values = c("#228b22", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234", "#800080", "gray"), 
+                    labels = c("I", "II", "III", "IV-A", "IV-B", "IV-C", "V", "No sample")) +
+  geom_text(stat = "stratum", aes(label = after_stat(count)), size = 5, color = "white") +
+  theme_minimal() +
+  #theme(legend.position = "bottom") +
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1))+ xlab("Timepoint")
+
+# ggsave(here("Figures/Sankey_FLIP_cst_transitions.png"), sankey_FLIP, width = 15, height = 9, dpi= 300)
+# ggsave(here("Figures/Sankey_FLIP_cst_transitions.svg"), sankey_FLIP, width = 15, height = 9, dpi= 300)
+```
+
+### FLIP Sankey plot FLIP T0 -> T3 
+```{r}
+FLIP_timepoint0_3 <- FLIP_ord %>% filter(Timepoint == "T0" |Timepoint == "T3" )
+
+FLIP_T0T3_sankey <- FLIP_timepoint0_3 %>% select(`FLIP number`, Timepoint, Outcome, CST)
+
+table(FLIP_T0T3_sankey$CST)
+
+wide_data <- FLIP_T0T3_sankey %>%
+  rename(subject = `FLIP number`,   # Use your actual subject ID column name
+         CST = CST) %>%
+  select(subject, Timepoint, CST) %>%
+  distinct() %>%
+  pivot_wider(names_from = Timepoint, values_from = CST)
+  
+  long_alluvial <- wide_data %>%
+  pivot_longer(cols = starts_with("T"),
+    names_to = "Timepoint",
+    values_to = "CST") %>%
+  arrange(subject, Timepoint)
+  
+sankey_to_t3 <- ggplot(long_alluvial,
+       aes(x = Timepoint, stratum = CST, alluvium = subject,
+           fill = CST, label = CST)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback",
+            color = "darkgray") +
+  geom_stratum() +
+  scale_fill_manual(values = c("#228b22", "#66cdaa","#ffcc00", "#b22222","#c62828", "#e34234", "#800080", "gray"), 
+                    labels = c("I", "II", "III", "IV-A", "IV-B", "IV-C", "V", "No sample")) +
+  geom_text(stat = "stratum", aes(label = after_stat(count)), size = 5, color = "white") +
+  theme_minimal() +
+  theme(legend.position = "right") +
+        theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1)) + ggtitle("FLIP")
+
+#ggsave(here("Figures/Sankey_plot_cst_transitions_FLIP_T0_T3.png"), sankey_to_t3, width = 9, height = 9, dpi= 300)  
+```
+
+### VMET2 Sankey plot A -> B
+```{r}
+VMET_AB <- VMET_ordered %>% filter(VMET_ordered$Timepoint == "A" |VMET_ordered$Timepoint  == "B" )
+
+VMET_AB_sankey <- VMET_AB %>% select(`V2 Number`, Timepoint, Outcome, CST)
+
+table(VMET_AB_sankey$CST)
+
+wide_data <- VMET_AB_sankey %>%
+  rename(subject = `V2 Number`,   
+         CST = CST) %>%
+  select(subject, Timepoint, CST) %>%
+  distinct() %>%
+  pivot_wider(names_from = Timepoint, values_from = CST)
+  
+  
+  long_alluvial <- wide_data %>%
+  pivot_longer(cols = c("A", "B"),
+    names_to = "Timepoint",
+    values_to = "CST") %>%
+  arrange(subject, Timepoint)
+  
+  
+sankey_AB <- ggplot(long_alluvial,
+       aes(x = Timepoint, stratum = CST, alluvium = subject,
+           fill = CST, label = CST)) +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback",
+            color = "darkgray") +
+  geom_stratum() +
+  scale_fill_manual(values = c("#228b22", "#66cdaa","#ffcc00","#c62828", "#e34234", "#800080", "gray")) +
+  geom_text(stat = "stratum", aes(label = after_stat(count)), size = 5, color = "white") +
+  theme_minimal() +
+  theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=1), legend.position =  "right") + ggtitle("VMET2")
+
+
+#ggsave(here("Figures/Sankey_plot_cst_transitions_VMET_A_B.png"), sankey_AB, width = 9, height = 9, dpi= 300)  
+```
+
+### Assemble combined FLIP-VMET2 sankey plot figure
+```{r}
+combined_Sankey <- (sankey_AB + theme_custom_plot() + theme(legend.position="none")) + (sankey_to_t3 + theme_custom_plot())
+combined_Sankey <- combined_Sankey 
+
+ggsave(here('./Figures/Microbiome_VMETFLIPSankey.png'), combined_Sankey, dpi=300, width = 183, height = 110,  units = "mm")
+ggsave(here('./Figures/Microbiome_VMETFLIPSankey.svg'), combined_Sankey, dpi=300, width = 183, height = 110,  units = "mm",
+  device = svglite::svglite, fix_text_size = FALSE)
+
+# Save the ggplot/patchwork object so other notebooks can reuse it as a native (vector) panel
+saveRDS(combined_Sankey, here('./Figures/Microbiome_VMETFLIPSankey.rds'))
+```
+
+### Bacterial load and Lactin-V across time - boxplots
+```{r}
+BactLoad_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`Total_Bacterial_Load_16SCopyNo/ml`))) +
+  geom_boxplot(outlier.shape = NA, col='steelblue4', alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_color_manual(values = CST_colours) +  
+  labs(y = "log10(Bacterial 16S copies per ml)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"), 
+        plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/BactLoad_Boxplot.png'), BactLoad_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/BactLoad_Boxplot.svg'), BactLoad_boxplot, dpi=300, width=10, height=8)
+
+
+LactinV_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`))) + 
+  geom_boxplot(outlier.shape = NA, col='steelblue4', alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_color_manual(values = CST_colours) +  
+  labs(y = "log10(Lactin-V copies per ml)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.background = element_rect(fill = "white", colour='white'))
+
+
+# ggsave(here('./Figures/LactV_Boxplot.png'), LactinV_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactV_Boxplot.svg'), LactinV_boxplot, dpi=300, width=10, height=8)
+
+LactinV_BactLoad_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`/`Total_Bacterial_Load_16SCopyNo/ml`))) + 
+  geom_boxplot(outlier.shape = NA, col='steelblue4', alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_color_manual(values = CST_colours) +  
+  labs(y = "log10(Lactin-V/Bacterial Load)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/LactV_Load_Ratio_Boxplot.png'), LactinV_BactLoad_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactV_Load_Ratio_Boxplot.svg'), LactinV_BactLoad_boxplot, dpi=300, width=10, height=8)
+
+```
+
+# Bacterial load and Lactin-V boxplots across time - split by Coloniser vs Non-coloniser
+```{r}
+responder_colour <- c("Responder" =  "#619CFF", "Non-responder" =  "coral")
+
+BactLoad_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`Total_Bacterial_Load_16SCopyNo/ml`))) + 
+  geom_boxplot(outlier.shape = NA, aes(fill=Responder), alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_colour_manual(values = cst_colors, name='CST') +
+  scale_fill_manual(values = responder_colour) +  
+  stat_compare_means(comparisons = list(c("Responder", "Non-responder")),
+    method = "wilcox.test", label = "p.signif", hide.ns = FALSE) +
+  labs(y = "log10(Bacterial 16S copies per ml)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"), 
+        plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/BactLoad_Boxplot.png'), BactLoad_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/BactLoad_Boxplot.svg'), BactLoad_boxplot, dpi=300, width=10, height=8)
+
+LactinV_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`))) + 
+  geom_boxplot(outlier.shape = NA, col='steelblue4', alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_color_manual(values = CST_colours) +  
+   stat_compare_means(comparisons=list(c("T0", "T1")),
+                      method = "wilcox.test", label = "p.signif", hide.ns = FALSE) +
+  labs(y = "log10(Lactin-V copies per ml)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.background = element_rect(fill = "white", colour='white'))
+
+
+# ggsave(here('./Figures/LactV_Boxplot.png'), LactinV_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactV_Boxplot.svg'), LactinV_boxplot, dpi=300, width=10, height=8)
+
+LactinV_BactLoad_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`/`Total_Bacterial_Load_16SCopyNo/ml`))) + 
+  geom_boxplot(outlier.shape = NA, col='steelblue4', alpha = 0.6, show.legend = FALSE,  linewidth = 0.5) + 
+  geom_jitter(aes(col = CST), size = 2) + 
+  scale_color_manual(values = CST_colours) +  
+  labs(y = "log10(Lactin-V/Bacterial Load)") + theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"),
+   plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/LactV_Load_Ratio_Boxplot.png'), LactinV_BactLoad_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactV_Load_Ratio_Boxplot.svg'), LactinV_BactLoad_boxplot, dpi=300, width=10, height=8)
+
+```
+
+# Split by Responder 
+```{r}
+stat_test_bactLoad_resp <- FLIP_Data %>% 
+mutate(log_bacterial_load = log10(`Total_Bacterial_Load_16SCopyNo/ml`)) %>%
+group_by(Timepoint) %>% 
+wilcox_test(log_bacterial_load ~ Responder) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "Timepoint", dodge = 0.8)
+
+bactLoadResp_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`Total_Bacterial_Load_16SCopyNo/ml`))) + 
+  geom_boxplot(outlier.shape = NA, aes(fill = Responder), 
+    alpha = 0.6, linewidth = 0.5, position = position_dodge(0.8)) + 
+  geom_point(aes(col = CST, group = Responder), 
+    size = 2, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8)) + 
+  scale_colour_manual(values = cst_colors, name = 'CST') +
+  scale_fill_manual(values = responder_colour, labels = c("Responder" = "Yes", 
+                    "Non-responder" = "No"), 
+                    name = 'Lactin-V colonisation') + 
+  stat_pvalue_manual(stat_test_bactLoad_resp, label = "p.adj.signif",
+    tip.length = 0.01, hide.ns = FALSE, step.increase = 0.05) +
+  labs(y = "log10(Bacterial 16S copies per ml)") + 
+  theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"), 
+    plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/BactLoad_Responder_Boxplot.png'), bactLoadResp_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/BactLoad_Responder_Boxplot.svg'), bactLoadResp_boxplot, dpi=300, width=10, height=8)
+
+stat_test_LactV_resp <- FLIP_Data %>% 
+mutate(log_lactV = log10(`LactinV_16S_CopyNo/mL`)) %>%
+group_by(Timepoint) %>% 
+wilcox_test(log_lactV ~ Responder) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "Timepoint", dodge = 0.8)
+
+LactinVResp_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`))) + 
+  geom_boxplot(outlier.shape = NA, aes(fill = Responder), 
+    alpha = 0.6, linewidth = 0.5, position = position_dodge(0.8)) + 
+  geom_point(aes(col = CST, group = Responder), 
+    size = 2, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8)) + 
+  scale_colour_manual(values = cst_colors, name = 'CST') +
+  scale_fill_manual(values = responder_colour, labels = c("Responder" = "Yes", 
+                    "Non-responder" = "No"), 
+                    name = 'Lactin-V colonisation') + 
+  stat_pvalue_manual(stat_test_LactV_resp, label = "p.adj.signif",
+    tip.length = 0.01, hide.ns = FALSE, step.increase = 0.05) +
+  labs(y = "log10(Lactin-V copies per ml)") + 
+  theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"), 
+    plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/LactinV_Responder_Boxplot.png'), LactinVResp_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactinV_Responder_Boxplot.svg'), LactinVResp_boxplot, dpi=300, width=10, height=8)
+
+stat_test_BactLactV_resp <- FLIP_Data %>% 
+mutate(log_lactV_Bact = log10(`LactinV_16S_CopyNo/mL`/`Total_Bacterial_Load_16SCopyNo/ml`)) %>%
+group_by(Timepoint) %>% 
+wilcox_test(log_lactV_Bact ~ Responder) %>%
+  adjust_pvalue(method = "bonferroni") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "Timepoint", dodge = 0.8)
+
+LactinVBactLoadResp_boxplot <- ggplot(FLIP_Data, aes(x = Timepoint, y = log10(`LactinV_16S_CopyNo/mL`/`Total_Bacterial_Load_16SCopyNo/ml`))) + 
+  geom_boxplot(outlier.shape = NA, aes(fill = Responder), 
+    alpha = 0.6, linewidth = 0.5, position = position_dodge(0.8)) + 
+  geom_point(aes(col = CST, group = Responder), 
+    size = 2, position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8)) + 
+  scale_colour_manual(values = cst_colors, name = 'CST') +
+  # scale_fill_manual(values = responder_colour, name = 'Responder') +  
+  scale_fill_manual(values = responder_colour, labels = c("Responder" = "Yes", 
+                    "Non-responder" = "No"), 
+                    name = 'Lactin-V colonisation') + 
+  stat_pvalue_manual(stat_test_BactLactV_resp, label = "p.adj.signif",
+    tip.length = 0.01, hide.ns = FALSE, step.increase = 0.05) +
+  labs(y = "log10(Lactin-V/Bacterial Load)") + 
+  theme_minimal() + 
+  theme(axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),                    
+    legend.title = element_text(size = 14, face = "bold"),  
+    legend.text = element_text(size = 12),                  
+    strip.text = element_text(size = 14, face = "bold"), 
+    plot.background = element_rect(fill = "white", colour='white'))
+
+# ggsave(here('./Figures/LactinV_BactLoad_Responder_Boxplot.png'), LactinVBactLoadResp_boxplot, dpi=300, width=10, height=8)
+# ggsave(here('./Figures/LactinV_BactLoad_Responder_Boxplot.svg'), LactinVBactLoadResp_boxplot, dpi=300, width=10, height=8)
+```
+
+## FLIP 16S Count matrix heatmap
+```{r}
+orderedFLIPDataset <- cbind(FLIP_16S[, 1:32],  FLIP_16S[, 33:ncol(FLIP_16S)][, order(colSums(apply(FLIP_16S[, 33:ncol(FLIP_16S)], 2, as.numeric)), decreasing=T)])
+
+orderedFLIPDataset <- tibble::as_tibble(orderedFLIPDataset)
+orderedFLIPDataset[, 33:ncol(orderedFLIPDataset)] <- apply(orderedFLIPDataset[, 33:ncol(orderedFLIPDataset)], 2, as.numeric)
+
+expression_data_scaled <- log(t(orderedFLIPDataset[, 33:(32 + 50)]) + 1)
+
+colnames(expression_data_scaled) <- orderedFLIPDataset$`Sample Name`
+
+bacterialNames <- colnames(orderedFLIPDataset)[33:ncol(orderedFLIPDataset)]
+
+parse_taxonomy <- function(tax_string) {
+
+  levels <- strsplit(tax_string, ";")[[1]]
+  skip_values <- c("unidentified", "uncultured", "unknown", 
+                   "metagenome", "uncultured_bacterium", "uncultured_Gemella",
+                   "Clostridiales_bacterium", "Anaerococcus_sp.")
+  
+  for (i in length(levels):1) {
+    prefix <- sub("^([a-z]?)__.*", "\\1", levels[i])
+    value <- sub("^[a-z]?__", "", levels[i])
+    
+    if (nchar(value) > 0 && !tolower(value) %in% skip_values) {
+      if (prefix == "s") {
+        return(value)}
+      return(paste0(prefix, "_", value)) }
+  }
+  return(NA_character_)}
+
+rownames(expression_data_scaled) <-  as.character(sapply(bacterialNames, parse_taxonomy))[1:50]
+
+maxCol <- max(abs(expression_data_scaled))
+breaks = seq(-maxCol, maxCol, length.out = 100)
+
+col_fun = colorRamp2(c(-maxCol, 0, maxCol), c("steelblue4", "white", "firebrick4"))
+col_fun = colorRamp2(c(0, maxCol), c("steelblue3", "firebrick3"))
+
+col_fun = colorRamp2(c(0, maxCol), hcl_palette = "Viridis")
+
+
+eragny_full  <- paletteer_d("impressionist.colors::la_recolte_des_foins_eragny", n = 12)
+n_timepoints <- 7
+palette_length <- length(eragny_full)
+colour_idx <- round(seq(1, palette_length, length.out = n_timepoints))
+eragny_colors <- eragny_full[colour_idx]
+timepoint_colors <- setNames(as.character(eragny_colors), c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+
+
+heatmapHeader_Col <- columnAnnotation(`Outcome`=orderedFLIPDataset$Outcome,
+                                      `Timepoint`= orderedFLIPDataset$Timepoint,
+                                      `CST`= orderedFLIPDataset$CST,
+                                      col = list(`Outcome`=c(`sPTB`= "tomato3", `iPTB`= "darkorange", `Term`= "deepskyblue4"), 
+                                                 `Timepoint` = timepoint_colors,
+                                                 `CST`=CST_colour_table[2, ]),
+                              gp = gpar(col = "grey75"))
+
+
+microbiomeHeatmap <- Heatmap(as.matrix(expression_data_scaled), col=col_fun, name = "log(count + 1)", 
+        row_names_gp = gpar(fontsize = 16, fontface="italic"),
+        column_names_gp = gpar(fontsize = 16),
+        show_column_names = FALSE,
+        rect_gp = gpar(col = "white", lwd = 0.3),  
+        show_column_dend = TRUE,  
+        show_row_dend = TRUE, 
+        cluster_columns = TRUE,
+        cluster_rows = F,
+        column_dend_height = unit(40, "mm"),
+        column_dend_gp = gpar(padding = unit(c(1000, 1000, 200, 100), "mm")),
+        row_names_side = "left", column_names_side = "top", 
+        #left_annotation =  heatmapHeader, 
+        top_annotation = heatmapHeader_Col,
+        row_dend_side = 'left') 
+
+png(file=here('./Figures/FLIP_Metataxonomic_Heatmap.png'), width = 1800, height=1600)
+draw(microbiomeHeatmap, padding = unit(c(10, 40, 20, 20), "mm"))
+dev.off()
+
+svg(file=here('./Figures/FLIP_Metataxonomic_Heatmap.svg'), width = 18, height=16)
+draw(microbiomeHeatmap, padding = unit(c(10, 40, 20, 20), "mm"))
+dev.off()
+```
+

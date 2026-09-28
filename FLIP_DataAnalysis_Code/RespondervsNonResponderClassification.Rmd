@@ -1,0 +1,243 @@
+---
+title: "Responder vs Non-responder assessment"
+output: html_document
+---
+
+```{r}
+here::i_am('./RespondervsNonResponderClassification.Rmd')
+```
+
+```{r, echo=FALSE, warning=FALSE}
+library(here)
+library(ggplot2)
+
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(cluster)
+library(reshape2)
+```
+
+## Load data
+
+### FLIP
+```{r}
+FLIP_Clinical <- read_csv(here("Data/FLIP1_ClinicalData.csv"))
+# FLIP <-clean_names(FLIP)
+
+FLIP_MicrobiomeParams <- read_csv(here("Data/Microbiome_Parameters_FLIP_VMET2.csv"))
+
+FLIP_Data <- merge(FLIP_Clinical, FLIP_MicrobiomeParams, by='Sequencing Name')
+
+
+# Omit edge cases of pregnancy with rescue cerclage samping and T6A and T3.5
+FLIP_Data <- subset(FLIP_Data, Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E29')
+FLIP_Data <- subset(FLIP_Data, `Sample Name` != 'E186')
+```
+
+# Assignment of responder vs non-responder using clustering
+```{r}
+set.seed(12)
+# Identify flip_numbers with duplicate timepoints
+duplicate_timepoints <- FLIP_Data %>%
+  group_by(`FLIP number`, Timepoint) %>%
+  tally(name = "count") %>%
+  filter(count > 1)
+
+# subset(FLIP_Data, `FLIP number` == "F005")[, c("Sample Name", "FLIP number", "Gestational Age", "Timepoint")]
+
+# Repeated sample names 
+samples_to_remove <- c("E185", "E29")
+
+FLIP_Data_NoDuplicateTP <- FLIP_Data %>%
+  filter(!(`Sample Name` %in% samples_to_remove))
+
+FLIP_Data_NoDuplicateTP <- FLIP_Data_NoDuplicateTP %>%
+  filter(Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+
+FLIP_Data_NoDuplicateTP <- FLIP_Data_NoDuplicateTP %>% 
+  filter(`Sample Type` == "Participant sample")
+
+FLIP_Data_NoDuplicateTP <- FLIP_Data_NoDuplicateTP %>%
+  mutate(log_lac_v_copies = log10(FLIP_Data_NoDuplicateTP$`LactinV_16S_CopyNo/mL`))
+
+wide_data <- FLIP_Data_NoDuplicateTP %>%
+  pivot_wider(id_cols = `FLIP number`,
+    names_from = Timepoint,  values_from = log_lac_v_copies)
+
+
+# Remove patient_id column before clustering
+data_for_clustering <- wide_data[,-1] 
+
+# Replace NAs with the mean of each row (i.e., patient's average)
+clean_data <- data_for_clustering %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+
+# Check recommended number of clusters using the silhouette score
+silhouette_score <-function(k){
+  km <- kmeans(clean_data, centers = k, nstart = 25)
+  ss <- silhouette(km$cluster, dist(clean_data))
+  mean(ss[, 3])}
+
+k <- 2:10
+avg_sil <- sapply(k, silhouette_score)
+
+silhouette_plot <- ggplot(NULL, aes(x = k, y = avg_sil)) +
+  geom_point(size = 3) +
+  geom_line() +
+  labs(x = "Number of Clusters",
+    y = "Average Silhouette Score",
+    title = "Silhouette Method") +
+  theme_minimal(base_size = 14)
+
+# k = 2 optimal
+kmeans_result <- kmeans(clean_data, centers = 2)
+
+# Add cluster labels back to wide_data
+wide_data$cluster <- kmeans_result$cluster
+wide_data$cluster <- as.factor(kmeans_result$cluster)
+
+long_data <- melt(wide_data, id.vars = c("FLIP number", "cluster"),
+                  variable.name = "Timepoint", value.name = "value")
+
+timepoint_levels <- c("T0", "T1", "T2", "T3", "T4", "T5", "T6")
+long_data$tTmepoint <- factor(long_data$Timepoint, levels = timepoint_levels, ordered = TRUE)
+
+
+# Plot
+clustering <- ggplot(long_data, aes(x = factor(Timepoint, levels=c("T0", "T1", "T2", "T3", "T4", "T5", "T6")), 
+                                    y = value, group = `FLIP number`, color = cluster)) +
+  geom_line(alpha = 0.5) +
+  labs(title = "Patient Trajectories by Cluster", y= "log10(Lactin-V)") +
+  theme_minimal()
+
+
+clustering_k2 <- ggplot(long_data, aes(x = factor(Timepoint, levels=c("T0", "T1", "T2", "T3", "T4", "T5", "T6")),
+                                       y =log10(value), group = `FLIP number`)) +
+  geom_jitter(aes(color = cluster), width = 0.2, size = 2) +  
+  geom_line(aes(color = cluster), linetype = "dashed", alpha = 0.6) +
+  scale_color_manual(values = c("1" =  "#619CFF", "2" =  "#00BA38")) + #, "3" ="#F8766D")) +
+  theme_minimal() +
+  labs(x = "Timepoint", y = "lo10(Lactin-V copies/ml)") +
+  theme(legend.position = "none") +
+  theme(text = element_text(size = 22),legend.position = "right")
+
+ 
+# Create a lookup table: flip_number → cluster
+clusters <- wide_data %>%
+  select(`FLIP number`, cluster)
+
+# Merge cluster info into the long-format dataset
+FLIP_Data <- FLIP_Data %>%
+  left_join(clusters, by = "FLIP number")
+
+FLIP_Data <- FLIP_Data %>% mutate(Responder = case_when(cluster == "1" ~ "Non-responder",
+                                                   cluster == "2" ~ "Responder"))
+table(FLIP_Data$Responder)
+```
+
+# Optional - save
+```{r}
+# Merge cluster info into the long-format dataset
+FLIP_MicrobiomeParams_wResponder <- FLIP_MicrobiomeParams %>% # select(-c(cluster, Responder)) %>%
+  left_join(FLIP_Data[, c("Sequencing Name", "cluster", "Responder")], by = "Sequencing Name")
+
+# FLIP_MicrobiomeParams_wResponder %>% select(-`cluster`) %>% write_csv(here('./Data/NewDatasets/Microbiome_Parameters_FLIP_VMET2.csv'))
+```
+
+
+# Responder vs non-Responder
+```{r}
+FLIP_Data_Plot <- FLIP_Data %>%
+  filter(Timepoint %in% c("T0", "T1", "T2", "T3", "T4", "T5", "T6"))
+
+FLIP_Data_Plot <- FLIP_Data_Plot %>% 
+  filter(`Sample Type` == "Participant sample")
+
+
+clustering_k2 <- ggplot(FLIP_Data_Plot, aes(x = factor(Timepoint), y =log10(`LactinV_16S_CopyNo/mL`), group = `FLIP number`)) +
+  geom_point(aes(color = Responder), width = 0.2, size = 2) + 
+  geom_line(aes(color = Responder), linetype = "dashed", alpha = 0.6) +
+  scale_color_manual(values = c("Responder" = "#619CFF", "Non-responder" = "coral"),
+    labels = c("Responder" = "Yes", "Non-responder" = "No"),
+    name = "Lactin-V colonisation") + 
+  theme_minimal() +
+  labs(x = "Timepoint", y = "lo10(Lactin-V copies/ml)") +
+  theme(legend.position = "none") +
+  theme(text = element_text(size = 22), legend.position = "right",
+        plot.background = element_rect(fill = "white", colour="white"))
+
+ggsave(here('./Figures/LactV_Clusters.png'), clustering_k2, dpi=300, width=10, height=8)
+ggsave(here('./Figures/LactV_Clusters.svg'), clustering_k2, dpi=300, width=10, height=8)
+```
+```{r}
+
+FLIP_Data_Plot <- FLIP_Data_Plot %>%
+  group_by(`FLIP number`) %>%
+  filter(any(Timepoint == "T0")) %>%
+  arrange(Timepoint) %>%
+  mutate(
+    CST_at_T0 = first(CST[Timepoint == "T0"]),
+    CST_I_at_T0 = ifelse(CST_at_T0 == "I", "CST I", "Other")
+  ) %>%
+  ungroup()
+
+
+clustering_lactV_CST <- ggplot(FLIP_Data_Plot, aes(x = factor(Timepoint), y =log10(`LactinV_16S_CopyNo/mL`), group = `FLIP number`)) +
+  geom_point(aes(color = Responder), width = 0.2, size = 2) + 
+  geom_line(aes(color = Responder), linetype = "dashed", alpha = 0.6)  +
+  scale_color_manual(values = c("Responder" = "#619CFF", "Non-responder" = "coral"),
+    labels = c("Responder" = "Yes", "Non-responder" = "No"),
+    name = "Lactin-V colonisation") + 
+  theme_minimal() +
+  facet_wrap(~CST_at_T0) +
+  labs(x = "Timepoint", y = "lo10(Lactin-V copies/ml)") +
+  theme(legend.position = "none") +
+  theme(text = element_text(size = 22), legend.position = "right", 
+        plot.background = element_rect(fill = "white", colour="white"))
+
+
+ggsave(here('./Figures/LactV_Clusters_CST.png'), clustering_lactV_CST, dpi=300, width=10, height=8)
+ggsave(here('./Figures/LactV_Clusters_CST.svg'), clustering_lactV_CST, dpi=300, width=10, height=8)
+
+
+```
+
+
+
+####Is initial CST important for responder status?
+```{r}
+FLIP_t0 <- FLIP_Data_Plot %>% filter(FLIP_Data_Plot$Timepoint == "T0")
+
+table_cst <- table(FLIP_t0$Responder, FLIP_t0$CST)
+chisquared<- chisq.test(table_cst)
+p_value<- chisquared$p.value
+
+
+
+initial_cst_vsResponder <- ggplot(FLIP_t0, aes(fill = CST, x = Responder)) +
+              geom_bar(position = "fill", stat = "count") + 
+              scale_fill_manual(values = c("#228b22","#66cdaa","#ffcc00", "#b22222",
+                                             "#c62828","#ffc0cb", "#800080", "gray")) + 
+              theme_light() +  xlab("Lactin-V colonisation") + ylab("Count")+ labs(fill = "Valencia CST")+
+              geom_text(stat = "count", aes(label = ..count..), position = position_fill(vjust = 0.5),
+              color = "white", size = 5) +
+              scale_x_discrete(labels = c("Responder" = "Yes", "Non-responder" = "No")) +
+              theme(text = element_text(size = 20), axis.text.x = element_text(angle = 0, vjust = 0.5)) +
+              annotate("text", x = 1.5, y = 1.05,label = paste0("Chi-squared p = ", signif(p_value, 3)), size = 6)
+
+
+ggsave(here("Figures", "FLIP_initial_CST.png"), initial_cst_vsResponder, width =6, height = 9, dpi = 300)
+ggsave(here("Figures", "FLIP_initial_CST.svg"), initial_cst_vsResponder, width =6, height = 9, dpi = 300)
+```
+
+
+```{r}
+Figure2 <- clustering_k2 + initial_cst_vsResponder
+Figure2 <- Figure2 + plot_annotation(tag_levels = 'A') &
+                                 theme(plot.tag = element_text(size = 18, face = "bold"))
+
+ggsave(here('./Figures/Responders_Figure2.png'), Figure2, dpi=300, width=18, height=8)
+ggsave(here('./Figures/Responders_Figure2.svg'), Figure2, dpi=300, width=18, height=8)
+```
