@@ -1,0 +1,17 @@
+# Claude Code
+.claude/
+
+# R / RStudio
+.Rhistory
+.RData
+.Rproj.user/
+.Ruserdata
+*_cache/
+*_files/
+*.knit.md
+*.utf8.md
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
